@@ -103,8 +103,8 @@ export const sessions = pgTable(
     usedAt: timestamp("used_at", { withTimezone: true }), // set when rotated
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
 
-    // Fingerprint of the client this token was issued to. Lets the grace
-    // window tell a multi-tab race apart from a replayed (stolen) token.
+    // Issuing fingerprint until first rotation, then the consuming fingerprint.
+    // Grace-window replays must match the client that first consumed the token.
     ip: text("ip"),
     userAgent: text("user_agent"),
   },

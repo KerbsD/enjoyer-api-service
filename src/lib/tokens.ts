@@ -30,7 +30,7 @@ const DAY = 24 * HOUR;
 export const REFRESH_TTL_MS = 1 * DAY; // each refresh token (sliding)
 export const ABSOLUTE_SESSION_TTL_MS = 7 * DAY; // hard cap per login
 export const REFRESH_GRACE_MS = 10 * 1000; // multi-tab race window
-export const INVITE_TTL_MS = 72 * HOUR; // matches the verification email copy
+export const INVITE_TTL_MS = 72 * HOUR; // matches the invite email copy
 export const RESET_TTL_MS = 15 * MINUTE; // matches the reset email copy
 export const EMAIL_COOLDOWN_MS = 2 * MINUTE;
 

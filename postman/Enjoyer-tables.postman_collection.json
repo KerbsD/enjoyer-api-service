@@ -1,0 +1,648 @@
+{
+  "info": {
+    "name": "Enjoyer — Tables and QR codes",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "description": "Apply migrations first. Set local email/password for a Manager or Owner, then run Login and Create table. Run requests individually: updates affect the created table. Public resolution is API-only; QR links target the future customer /order page. Use Send and Download for QR PNG/SVG and the printable HTML sheet. No real table names, credentials or tokens are included."
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:3000",
+      "type": "string"
+    },
+    {
+      "key": "origin",
+      "value": "http://localhost:5173",
+      "type": "string"
+    },
+    {
+      "key": "email",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "password",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "accessToken",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "tableId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "tableToken",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "tableUrl",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "tableName",
+      "value": "Table 1",
+      "type": "string"
+    },
+    {
+      "key": "orderLimit",
+      "value": "5",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Login as Manager or Owner",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Origin",
+            "value": "{{origin}}"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": "{{baseUrl}}/auth/login",
+        "description": "",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"email\": \"{{email}}\",\n  \"pwd\": \"{{password}}\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Expected HTTP 200', () => pm.response.to.have.status(200));",
+              "if (pm.response.code === 200) pm.collectionVariables.set('accessToken', pm.response.json().accessToken);"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Create table",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Origin",
+            "value": "{{origin}}"
+          },
+          {
+            "key": "Authorization",
+            "value": "Bearer {{accessToken}}"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": "{{baseUrl}}/admin/tables",
+        "description": "",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"name\": \"{{tableName}}\",\n  \"orderLimit\": {{orderLimit}}\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Expected HTTP 201', () => pm.response.to.have.status(201));",
+              "if (pm.response.code === 201) { const t = pm.response.json().data; pm.collectionVariables.set('tableId', String(t.id)); pm.collectionVariables.set('tableToken', t.qrToken); pm.collectionVariables.set('tableUrl', t.qrUrl); }"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "List active tables",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Origin",
+            "value": "{{origin}}"
+          },
+          {
+            "key": "Authorization",
+            "value": "Bearer {{accessToken}}"
+          }
+        ],
+        "url": "{{baseUrl}}/admin/tables?active=true&limit=50&offset=0",
+        "description": ""
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Expected HTTP 200', () => pm.response.to.have.status(200));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Get table",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Origin",
+            "value": "{{origin}}"
+          },
+          {
+            "key": "Authorization",
+            "value": "Bearer {{accessToken}}"
+          }
+        ],
+        "url": "{{baseUrl}}/admin/tables/{{tableId}}",
+        "description": ""
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Expected HTTP 200', () => pm.response.to.have.status(200));",
+              "if (pm.response.code === 200) pm.test('QR identity stays unchanged', () => pm.expect(pm.response.json().data.qrToken).to.eql(pm.collectionVariables.get('tableToken')));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Resolve QR token without login",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Origin",
+            "value": "{{origin}}"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": "{{baseUrl}}/tables/resolve",
+        "description": "Use only the token, not the complete QR URL. Resolving does not create a session or order.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"token\": \"{{tableToken}}\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Expected HTTP 200', () => pm.response.to.have.status(200));",
+              "if (pm.response.code === 200) pm.test('Correct table', () => pm.expect(String(pm.response.json().data.id)).to.eql(pm.collectionVariables.get('tableId')));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Rename table",
+      "request": {
+        "method": "PATCH",
+        "header": [
+          {
+            "key": "Origin",
+            "value": "{{origin}}"
+          },
+          {
+            "key": "Authorization",
+            "value": "Bearer {{accessToken}}"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": "{{baseUrl}}/admin/tables/{{tableId}}",
+        "description": "",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"name\": \"{{tableName}} — Window\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Expected HTTP 200', () => pm.response.to.have.status(200));",
+              "if (pm.response.code === 200) pm.test('QR identity stays unchanged', () => pm.expect(pm.response.json().data.qrToken).to.eql(pm.collectionVariables.get('tableToken')));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Set order limit",
+      "request": {
+        "method": "PATCH",
+        "header": [
+          {
+            "key": "Origin",
+            "value": "{{origin}}"
+          },
+          {
+            "key": "Authorization",
+            "value": "Bearer {{accessToken}}"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": "{{baseUrl}}/admin/tables/{{tableId}}",
+        "description": "Sets the per-session limit for the future ordering flow; there is no cart/order API yet.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"orderLimit\": {{orderLimit}}\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Expected HTTP 200', () => pm.response.to.have.status(200));",
+              "if (pm.response.code === 200) pm.test('QR identity stays unchanged', () => pm.expect(pm.response.json().data.qrToken).to.eql(pm.collectionVariables.get('tableToken')));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Staff table list",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Origin",
+            "value": "{{origin}}"
+          },
+          {
+            "key": "Authorization",
+            "value": "Bearer {{accessToken}}"
+          }
+        ],
+        "url": "{{baseUrl}}/staff/tables?active=true&limit=50&offset=0",
+        "description": "Any active Staff, Manager or Owner may call this endpoint. It currently returns physical-table metadata, not live order/session status."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Expected HTTP 200', () => pm.response.to.have.status(200));",
+              "if (pm.response.code === 200) pm.test('No QR secrets in staff list', () => pm.response.json().data.forEach(t => { pm.expect(t).not.to.have.property('qrToken'); pm.expect(t).not.to.have.property('qrUrl'); }));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Download QR PNG",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Origin",
+            "value": "{{origin}}"
+          },
+          {
+            "key": "Authorization",
+            "value": "Bearer {{accessToken}}"
+          }
+        ],
+        "url": "{{baseUrl}}/admin/tables/{{tableId}}/qr?format=png",
+        "description": "Choose Send and Download to save the PNG."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Expected HTTP 200', () => pm.response.to.have.status(200));",
+              "pm.test('PNG content type', () => pm.expect(pm.response.headers.get('Content-Type')).to.include('image/png'));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Download QR SVG",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Origin",
+            "value": "{{origin}}"
+          },
+          {
+            "key": "Authorization",
+            "value": "Bearer {{accessToken}}"
+          }
+        ],
+        "url": "{{baseUrl}}/admin/tables/{{tableId}}/qr?format=svg",
+        "description": "Choose Send and Download to save the SVG."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Expected HTTP 200', () => pm.response.to.have.status(200));",
+              "pm.test('SVG content type', () => pm.expect(pm.response.headers.get('Content-Type')).to.include('image/svg+xml'));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Download printable active-table sheet",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Origin",
+            "value": "{{origin}}"
+          },
+          {
+            "key": "Authorization",
+            "value": "Bearer {{accessToken}}"
+          }
+        ],
+        "url": "{{baseUrl}}/admin/tables/qr-sheet",
+        "description": "Save the HTML, open it in a browser, then Print. Only active tables are included."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Expected HTTP 200', () => pm.response.to.have.status(200));",
+              "pm.test('HTML content type', () => pm.expect(pm.response.headers.get('Content-Type')).to.include('text/html'));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Deactivate table",
+      "request": {
+        "method": "PATCH",
+        "header": [
+          {
+            "key": "Origin",
+            "value": "{{origin}}"
+          },
+          {
+            "key": "Authorization",
+            "value": "Bearer {{accessToken}}"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": "{{baseUrl}}/admin/tables/{{tableId}}",
+        "description": "",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"active\": false\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Expected HTTP 200', () => pm.response.to.have.status(200));",
+              "if (pm.response.code === 200) pm.test('QR identity stays unchanged', () => pm.expect(pm.response.json().data.qrToken).to.eql(pm.collectionVariables.get('tableToken')));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Confirm deactivated QR is rejected",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Origin",
+            "value": "{{origin}}"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": "{{baseUrl}}/tables/resolve",
+        "description": "Run after Deactivate table.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"token\": \"{{tableToken}}\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Expected HTTP 404', () => pm.response.to.have.status(404));",
+              "pm.test('Invalid table QR', () => pm.expect(pm.response.json().code).to.eql('INVALID_TABLE_QR'));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Reactivate table",
+      "request": {
+        "method": "PATCH",
+        "header": [
+          {
+            "key": "Origin",
+            "value": "{{origin}}"
+          },
+          {
+            "key": "Authorization",
+            "value": "Bearer {{accessToken}}"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": "{{baseUrl}}/admin/tables/{{tableId}}",
+        "description": "",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"active\": true\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Expected HTTP 200', () => pm.response.to.have.status(200));",
+              "if (pm.response.code === 200) pm.test('QR identity stays unchanged', () => pm.expect(pm.response.json().data.qrToken).to.eql(pm.collectionVariables.get('tableToken')));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Confirm original QR works again",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Origin",
+            "value": "{{origin}}"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": "{{baseUrl}}/tables/resolve",
+        "description": "",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"token\": \"{{tableToken}}\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Expected HTTP 200', () => pm.response.to.have.status(200));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Reject malformed QR token",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Origin",
+            "value": "{{origin}}"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": "{{baseUrl}}/tables/resolve",
+        "description": "",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"token\": \"invalid-token\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Expected HTTP 404', () => pm.response.to.have.status(404));"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

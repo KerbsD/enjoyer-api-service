@@ -4,6 +4,7 @@ import type { NextFunction, Request, Response } from "express";
 import { setTimeout as sleep } from "node:timers/promises";
 import { getRefreshToken } from "../configs/cookieOptions.ts";
 import { createStore, redis, withRedisBreaker } from "./rateLimitStore.ts";
+import { LoginFailureStore } from "./loginFailureStore.ts";
 
 const MINUTE = 60 * 1000;
 const HOUR = 60 * MINUTE;
@@ -94,8 +95,7 @@ const BACKOFF_BASE_MS = 250; // first delay, doubling per failure
 const BACKOFF_MAX_MS = 5000; // cap, so legitimate logins still complete
 const BACKOFF_WINDOW_MS = 15 * MINUTE; // sliding, resets on successful login
 
-type BackoffState = { failures: number; resetAt: number };
-const memoryBackoff = new Map<string, BackoffState>();
+const memoryBackoff = redis ? null : new LoginFailureStore(BACKOFF_WINDOW_MS);
 
 const backoffKey = (key: string): string => `backoff:login:${key}`;
 
@@ -110,12 +110,7 @@ const readFailures = async (key: string): Promise<number> => {
     }
   }
 
-  const state = memoryBackoff.get(key);
-  if (!state || state.resetAt <= Date.now()) {
-    memoryBackoff.delete(key);
-    return 0;
-  }
-  return state.failures;
+  return memoryBackoff!.get(key);
 };
 
 const bumpFailures = async (key: string): Promise<void> => {
@@ -135,14 +130,7 @@ const bumpFailures = async (key: string): Promise<void> => {
     return;
   }
 
-  const now = Date.now();
-  const state = memoryBackoff.get(key);
-  if (state && state.resetAt > now) {
-    state.failures += 1;
-    state.resetAt = now + BACKOFF_WINDOW_MS;
-  } else {
-    memoryBackoff.set(key, { failures: 1, resetAt: now + BACKOFF_WINDOW_MS });
-  }
+  memoryBackoff!.bump(key);
 };
 
 const clearFailures = async (key: string): Promise<void> => {
@@ -155,7 +143,7 @@ const clearFailures = async (key: string): Promise<void> => {
     }
     return;
   }
-  memoryBackoff.delete(key);
+  memoryBackoff!.clear(key);
 };
 
 // Only 401 (bad credentials) counts as a failure; 200 clears the counter.

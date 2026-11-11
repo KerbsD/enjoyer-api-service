@@ -10,7 +10,11 @@ const BEARER_PREFIX = "bearer ";
 
 // Authentication only: proves who the caller is and sets req.user (id + role).
 // What they may DO is decided afterwards by requirePermission / can().
-export const verifyJwt = async (req: Request, res: Response, next: NextFunction) => {
+export const verifyJwt = async (
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) => {
   // Node lowercases header names, so only "authorization" exists
   const authHeader = req.headers.authorization ?? "";
 
@@ -42,8 +46,11 @@ export const verifyJwt = async (req: Request, res: Response, next: NextFunction)
 
   // Existing JWTs must not retain Owner privileges after a demotion, or allow
   // a disabled account to keep using protected routes until token expiry.
-  const [account] = await db.select({ role: users.role, active: users.active })
-    .from(users).where(eq(users.id, user.id)).limit(1);
+  const [account] = await db
+    .select({ role: users.role, active: users.active })
+    .from(users)
+    .where(eq(users.id, user.id))
+    .limit(1);
   if (!account?.active) {
     res.set("WWW-Authenticate", 'Bearer error="invalid_token"');
     return res.sendStatus(401);

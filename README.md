@@ -298,6 +298,98 @@ PostgreSQL and checks every seeded name, description, price, spicy flag and
 option assignment against the source manifest. It is an initial-seed check;
 intentional later menu edits can cause it to report differences.
 
+## Tables and QR codes
+
+Migration `0004_shop_tables.sql` is applied to the configured database. Run
+`npm run db:migrate` when setting up another database. Physical tables have a
+name, a stable random QR token, an order limit (default 5), and an active flag.
+No physical tables are seeded automatically; create the shop's actual tables
+through the API.
+
+| Method | Path | Permission / purpose |
+| --- | --- | --- |
+| POST | `/admin/tables` | Manager/Owner: create a table (201) |
+| GET | `/admin/tables?active=true&limit=50&offset=0` | Manager/Owner: list tables, including QR details |
+| GET | `/admin/tables/:id` | Manager/Owner: get one table |
+| PATCH | `/admin/tables/:id` | Manager/Owner: rename, change orderLimit, deactivate/reactivate |
+| GET | `/admin/tables/:id/qr?format=png` | Manager/Owner: download PNG (default) or SVG |
+| GET | `/admin/tables/qr-sheet` | Manager/Owner: download printable HTML containing active table codes |
+| GET | `/staff/tables` | Staff/Manager/Owner: list table metadata; QR tokens/URLs omitted |
+| POST | `/tables/resolve` | Public: resolve `{ "token": "QR_TOKEN" }` to an active table |
+
+Create with `{ "name": "Table 1" }`, optionally including `orderLimit` and
+`active`. Names are trimmed and limited to 1–100 characters. The order limit
+must be a JSON integer from 1 through 2147483647. PATCH accepts any nonempty
+subset of these three fields. Unknown fields, including a caller-supplied ID
+or QR token, are rejected. Use `{ "active": false }` to deactivate, or `true`
+to reactivate. Renaming and activation changes preserve the original QR token.
+There is no hard-delete or QR-rotation endpoint.
+
+Both list routes accept optional `active=true|false` and limit/offset pagination
+(default limit 50, maximum 100), ordered by ID. Staff reads currently show
+physical-table metadata only; free/open state, order counts and unpaid totals
+will come with table sessions and orders.
+
+Public resolution needs no staff login. It returns only `id`, `name` and
+`orderLimit`. An unknown, malformed nonempty or deactivated token returns 404
+with `code: "INVALID_TABLE_QR"`; missing/invalid body fields return 400. Resolving
+does not start a session, open a cart or place an order. The stored limit will
+be enforced by the future order submission flow.
+
+QR links use `CUSTOMER_URL/order#table=TOKEN`. `CUSTOMER_URL` is optional and
+falls back to `CLIENT_URL`; both must be plain origins, with HTTPS in production.
+Choose the intended customer origin before printing codes. The fragment keeps
+the token out of frontend server request URLs. The customer `/order` page is
+deferred: during this API phase, test the token with `/tables/resolve` in Postman.
+
+The single-code download rejects inactive tables with 409. The sheet includes
+only active tables and escapes their names. Save the downloaded HTML, open it
+in a browser and use Print. PNG/SVG downloads and the printable sheet are
+attachments; in Postman, use **Send and Download**.
+
+Import `postman/Enjoyer-tables.postman_collection.json`, set local `email`,
+`password` and an allowed `origin`, then run **Login as Manager or Owner** and
+**Create table**. The collection captures `tableId`, `tableToken` and `tableUrl`
+for the remaining requests. Run requests individually: the collection includes
+deactivation and reactivation checks. Tokens and credentials should stay local.
+
+## Audit fixes and verification
+
+The two confirmed findings in `AUDIT-2026-11-11.md` have been fixed:
+
+- With no Redis, login-backoff entries are swept every minute after their
+  15-minute sliding expiry. The store is capped at 10,000 addresses; at capacity
+  it evicts the least recently failed address. Per-IP limiters still apply.
+- The first refresh records the consuming IP/user-agent on the used token.
+  Another request from that same client can use the 10-second grace window
+  after a network change. A different client or an out-of-window replay still
+  revokes the family. This reuses existing session columns; no auth migration
+  is required. Unused tokens retain their issuing fingerprint for mismatch logs.
+
+`npm test` now covers the actual backoff middleware, fake-clock expiry/capacity,
+refresh grace/replay regressions and table permissions, validation, public
+resolution, QR formats and printable HTML. `npm run typecheck` also includes all
+test files and seed scripts.
+
+For real PostgreSQL concurrency checks, set `ENJOYER_TEST_DATABASE_URL` to a
+**direct** connection with permission to create schemas, then run
+`npm run test:integration`. Prefer a dedicated test database/branch. The runner
+never falls back to `DATABASE_URL`; without the explicit test URL it reports a
+skipped suite. For Neon, use the direct host without `-pooler` because the tests
+require a session-level `search_path`.
+
+Each run creates a random `enjoyer_test_<hex>` schema, applies the real migration
+files there, and removes only that schema when finished. The application's
+`public` schema is never written. Normal test failures also trigger cleanup;
+force-killing the process may leave its temporary schema for manual cleanup.
+Email and the external breach check are mocked; database queries and transaction
+locks are real. Tests cover refresh races after a network change, concurrent
+Owner deactivation, one-time password reset consumption, refresh versus logout,
+complete option-assignment replacement and the table lifecycle/constraints.
+
+Verification on 2026-11-11: type check passed, 58 unit/HTTP tests passed, and all
+6 PostgreSQL integration scenarios passed (7 test results including the parent).
+
 ## Checks
 
 Run `npm run typecheck` and `npm test`. The authentication suite runs the

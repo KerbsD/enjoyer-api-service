@@ -6,16 +6,16 @@ import { isWellFormedToken } from "../../lib/tokens.ts";
 
 export const resolveTable = async (req: Request, res: Response) => {
   const invalid = () =>
-    res
-      .status(404)
-      .json({
-        success: false,
-        code: "INVALID_TABLE_QR",
-        message:
-          "This table QR code is invalid or no longer active. Please ask staff for help.",
-      });
+    res.status(404).json({
+      success: false,
+      code: "INVALID_TABLE_QR",
+      message:
+        "This table QR code is invalid or no longer active. Please ask staff for help.",
+    });
   const { token } = req.body as { token: string };
+
   if (!isWellFormedToken(token)) return invalid();
+  
   const [table] = await db
     .select({
       id: shopTables.id,

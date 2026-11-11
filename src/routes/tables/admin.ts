@@ -1,0 +1,13 @@
+import express from "express";
+import { requirePermission } from "../../middlewares/requirePermission.ts";
+import { createTable, getTable, updateTable, listTables, downloadQr, downloadQrSheet } from "../../controllers/tables/admin.ts";
+import { validateCreateTable, validateUpdateTable, validateListTables, validateQrQuery } from "../../validators/tables.ts";
+const router = express.Router();
+router.use(requirePermission("table:manage"));
+router.get("/", validateListTables, listTables(true));
+router.post("/", validateCreateTable, createTable);
+router.get("/qr-sheet", downloadQrSheet);
+router.get("/:id", getTable);
+router.patch("/:id", validateUpdateTable, updateTable);
+router.get("/:id/qr", validateQrQuery, downloadQr);
+export default router;

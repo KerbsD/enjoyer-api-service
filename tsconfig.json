@@ -1,0 +1,21 @@
+{
+  "compilerOptions": {
+    "target": "esnext",
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "allowImportingTsExtensions": true,
+    "erasableSyntaxOnly": true,
+    "noEmit": true,
+    "strict": true,
+    "skipLibCheck": true
+  },
+  "include": [
+    "server.ts",
+    "drizzle.config.ts",
+    "src/**/*.ts",
+    "src/**/*.d.ts",
+    "scripts/seed-menu.ts",
+    "scripts/verify-menu.ts",
+    "scripts/data/**/*.ts"
+  ]
+}

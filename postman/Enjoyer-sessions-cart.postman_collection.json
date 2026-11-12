@@ -1,0 +1,389 @@
+{
+  "info": {
+    "name": "Enjoyer — Settings, table sessions and cart",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "description": "Apply migration 0005 first. Set local email/password and origin for a Manager or Owner, plus tableToken (from the tables collection or a table row). menuItemId and optionId must exist in your database. Run requests individually: settings and hours changes are persistent, and cart mutations require the current version. Public store status, table open and cart requests need no staff login; cart requests send X-Table-Token. No real credentials or tokens are included."
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:3000", "type": "string" },
+    { "key": "origin", "value": "http://localhost:5173", "type": "string" },
+    { "key": "email", "value": "", "type": "string" },
+    { "key": "password", "value": "", "type": "string" },
+    { "key": "accessToken", "value": "", "type": "string" },
+    { "key": "tableToken", "value": "", "type": "string" },
+    { "key": "menuItemId", "value": "1", "type": "string" },
+    { "key": "optionId", "value": "", "type": "string" },
+    { "key": "dayOfWeek", "value": "1", "type": "string" },
+    { "key": "holidayDate", "value": "2026-12-25", "type": "string" },
+    { "key": "cartVersion", "value": "0", "type": "string" },
+    { "key": "cartItemId", "value": "", "type": "string" }
+  ],
+  "item": [
+    {
+      "name": "Login as Manager or Owner",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Origin", "value": "{{origin}}" },
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "url": "{{baseUrl}}/auth/login",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"email\": \"{{email}}\",\n  \"pwd\": \"{{password}}\"\n}",
+          "options": { "raw": { "language": "json" } }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Expected HTTP 200', () => pm.response.to.have.status(200));",
+              "if (pm.response.code === 200) pm.collectionVariables.set('accessToken', pm.response.json().accessToken);"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Public store status",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{baseUrl}}/store/status"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Expected HTTP 200', () => pm.response.to.have.status(200));",
+              "pm.test('Has a seven-day week', () => pm.expect(pm.response.json().data.week.length).to.eql(7));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Get settings",
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }],
+        "url": "{{baseUrl}}/admin/settings"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": ["pm.test('Expected HTTP 200', () => pm.response.to.have.status(200));"]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Update idle and confirmation timeouts",
+      "request": {
+        "method": "PATCH",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{accessToken}}" },
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "url": "{{baseUrl}}/admin/settings",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"idleTimeoutMinutes\": 180,\n  \"confirmationExpiryMinutes\": 10\n}",
+          "options": { "raw": { "language": "json" } }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Expected HTTP 200', () => pm.response.to.have.status(200));",
+              "pm.test('Idle timeout applied', () => pm.expect(pm.response.json().data.idleTimeoutMinutes).to.eql(180));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Get weekly store hours",
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }],
+        "url": "{{baseUrl}}/admin/store-hours"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Expected HTTP 200', () => pm.response.to.have.status(200));",
+              "pm.test('Lists seven weekdays', () => pm.expect(pm.response.json().data.length).to.eql(7));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Set one weekday schedule",
+      "request": {
+        "method": "PUT",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{accessToken}}" },
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "url": "{{baseUrl}}/admin/store-hours/{{dayOfWeek}}",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"closed\": false,\n  \"openTime\": \"08:00\",\n  \"closeTime\": \"17:00\"\n}",
+          "options": { "raw": { "language": "json" } }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": ["pm.test('Expected HTTP 200', () => pm.response.to.have.status(200));"]
+          }
+        }
+      ]
+    },
+    {
+      "name": "List holiday overrides",
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }],
+        "url": "{{baseUrl}}/admin/holiday-overrides?limit=100&offset=0"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": ["pm.test('Expected HTTP 200', () => pm.response.to.have.status(200));"]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Close one calendar date",
+      "request": {
+        "method": "PUT",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{accessToken}}" },
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "url": "{{baseUrl}}/admin/holiday-overrides/{{holidayDate}}",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"closed\": true\n}",
+          "options": { "raw": { "language": "json" } }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": ["pm.test('Expected HTTP 200', () => pm.response.to.have.status(200));"]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Delete holiday override",
+      "request": {
+        "method": "DELETE",
+        "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }],
+        "url": "{{baseUrl}}/admin/holiday-overrides/{{holidayDate}}"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": ["pm.test('Expected HTTP 204', () => pm.response.to.have.status(204));"]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Open table and start/reuse session",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "url": "{{baseUrl}}/tables/open",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"token\": \"{{tableToken}}\"\n}",
+          "options": { "raw": { "language": "json" } }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Expected HTTP 200', () => pm.response.to.have.status(200));",
+              "if (pm.response.code === 200) { const c = pm.response.json().data.cart; pm.collectionVariables.set('cartVersion', String(c.version)); }"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Get shared cart",
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "X-Table-Token", "value": "{{tableToken}}" }],
+        "url": "{{baseUrl}}/tables/cart"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Expected HTTP 200', () => pm.response.to.have.status(200));",
+              "if (pm.response.code === 200) pm.collectionVariables.set('cartVersion', String(pm.response.json().data.version));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Add item to cart",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "X-Table-Token", "value": "{{tableToken}}" },
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "url": "{{baseUrl}}/tables/cart/items",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"menuItemId\": {{menuItemId}},\n  \"quantity\": 1,\n  \"optionIds\": [{{optionId}}],\n  \"note\": \"\",\n  \"version\": {{cartVersion}}\n}",
+          "options": { "raw": { "language": "json" } }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Expected HTTP 200', () => pm.response.to.have.status(200));",
+              "if (pm.response.code === 200) { const c = pm.response.json().data; pm.collectionVariables.set('cartVersion', String(c.version)); if (c.items.length) pm.collectionVariables.set('cartItemId', String(c.items[c.items.length - 1].id)); }"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Change cart line quantity and note",
+      "request": {
+        "method": "PATCH",
+        "header": [
+          { "key": "X-Table-Token", "value": "{{tableToken}}" },
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "url": "{{baseUrl}}/tables/cart/items/{{cartItemId}}",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"quantity\": 2,\n  \"note\": \"no sugar\",\n  \"version\": {{cartVersion}}\n}",
+          "options": { "raw": { "language": "json" } }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Expected HTTP 200', () => pm.response.to.have.status(200));",
+              "if (pm.response.code === 200) pm.collectionVariables.set('cartVersion', String(pm.response.json().data.version));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Remove one cart line",
+      "request": {
+        "method": "DELETE",
+        "header": [{ "key": "X-Table-Token", "value": "{{tableToken}}" }],
+        "url": "{{baseUrl}}/tables/cart/items/{{cartItemId}}?version={{cartVersion}}"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Expected HTTP 200', () => pm.response.to.have.status(200));",
+              "if (pm.response.code === 200) pm.collectionVariables.set('cartVersion', String(pm.response.json().data.version));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Clear the cart",
+      "request": {
+        "method": "DELETE",
+        "header": [{ "key": "X-Table-Token", "value": "{{tableToken}}" }],
+        "url": "{{baseUrl}}/tables/cart?version={{cartVersion}}"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Expected HTTP 200', () => pm.response.to.have.status(200));",
+              "if (pm.response.code === 200) { const c = pm.response.json().data; pm.collectionVariables.set('cartVersion', String(c.version)); pm.test('Cart is empty', () => pm.expect(c.items.length).to.eql(0)); }"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Try a stale version (expect 409)",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "X-Table-Token", "value": "{{tableToken}}" },
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "url": "{{baseUrl}}/tables/cart/items",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"menuItemId\": {{menuItemId}},\n  \"quantity\": 1,\n  \"optionIds\": [],\n  \"note\": \"\",\n  \"version\": 0\n}",
+          "options": { "raw": { "language": "json" } }
+        },
+        "description": "Only returns 409 if the cart version has moved past 0. Otherwise this adds a line and returns 200."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Expected HTTP 409 or 200', () => pm.expect([200, 409]).to.include(pm.response.code));"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

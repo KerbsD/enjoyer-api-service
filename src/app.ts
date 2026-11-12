@@ -30,8 +30,12 @@ import staffMenuItemsRoute from "./routes/menuItems/staff.ts";
 import { handlePublicMenu } from "./controllers/menuItems/public.ts";
 import adminTablesRoute from "./routes/tables/admin.ts";
 import staffTablesRoute from "./routes/tables/staff.ts";
-import { resolveTable } from "./controllers/tables/public.ts";
-import { validateResolveTable } from "./validators/tables.ts";
+import publicTablesRoute from "./routes/tables/public.ts";
+import publicCartRoute from "./routes/cart/public.ts";
+import adminSettingsRoute from "./routes/settings/admin.ts";
+import adminStoreHoursRoute from "./routes/storeHours/admin.ts";
+import adminHolidayOverridesRoute from "./routes/storeHours/holidays.ts";
+import { getPublicStoreStatus } from "./controllers/storeHours/public.ts";
 
 const app = express();
 if (env.TRUST_PROXY_HOPS > 0) app.set("trust proxy", env.TRUST_PROXY_HOPS);
@@ -76,7 +80,9 @@ app.use("/auth/invite", inviteRoute);
 // Public routes for customers (QR menu, ordering) are mounted here, above
 // verifyJwt. Customers never log in.
 app.get("/menu", handlePublicMenu);
-app.post("/tables/resolve", validateResolveTable, resolveTable);
+app.get("/store/status", getPublicStoreStatus);
+app.use("/tables/cart", publicCartRoute);
+app.use("/tables", publicTablesRoute);
 
 app.use(verifyJwt);
 
@@ -88,6 +94,9 @@ app.use("/admin/menu-items", adminMenuItemsRoute);
 app.use("/staff/menu-items", staffMenuItemsRoute);
 app.use("/admin/tables", adminTablesRoute);
 app.use("/staff/tables", staffTablesRoute);
+app.use("/admin/settings", adminSettingsRoute);
+app.use("/admin/store-hours", adminStoreHoursRoute);
+app.use("/admin/holiday-overrides", adminHolidayOverridesRoute);
 
 // Everything below needs a valid access token. Guard each route with
 // requirePermission("...") from src/middlewares/requirePermission.ts, e.g.

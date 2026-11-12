@@ -251,17 +251,20 @@ because the source menu provides none. Category display order is Signature
 Coffee, Black, White, Non-Coffee, Refreshers, Starters, Sandwiches, Pastries.
 
 `0003_menu_options.sql` adds option groups, choices, and item/group links.
-Each group allows at most one selection. `required: true` means a selection is
-required; otherwise leaving it unselected preserves the standard recipe/base
-price. `priceDelta` is an exact decimal peso surcharge. Each choice has an
+Groups support `minSelections` and `maxSelections` for multi-select add-ons; the
+legacy `required` flag is true exactly when `minSelections` is at least 1.
+Each seeded group currently allows at most one selection, so the public flag
+stays `maxSelections: 1`. A group with `required: true` requires a selection;
+otherwise leaving it unselected preserves the standard recipe/base price.
+`priceDelta` is an exact decimal peso surcharge. Each choice has an
 availability flag, allowing it to stay visible but unavailable. Shared group
 edits affect every attached item.
 
 `GET /menu` now includes `optionGroups` on every item. Each group contains
-`id`, `name`, `required`, `maxSelections: 1`, `sortOrder` and `options` (choice
-IDs, names, price deltas, availability and order). Options are batch-loaded for
-the visible menu. Choice validation and server-calculated order totals will be
-enforced when cart/order submission is implemented; there is no ordering API yet.
+`id`, `name`, `required`, `minSelections`, `maxSelections`, `sortOrder` and
+`options` (choice IDs, names, price deltas, availability and order). Options are
+batch-loaded for the visible menu. Cart submission validates these selections
+and calculates totals server-side; there is no order-placement API yet.
 
 All management endpoints below require `menu:manage` (Manager or Owner):
 
@@ -269,7 +272,7 @@ All management endpoints below require `menu:manage` (Manager or Owner):
 | --- | --- | --- |
 | GET | `/admin/option-groups` | List groups with choices |
 | POST | `/admin/option-groups` | Create a group and 1–50 choices atomically |
-| PATCH | `/admin/option-groups/:id` | Edit name, required flag or order |
+| PATCH | `/admin/option-groups/:id` | Edit name, order/required flag, minimum and maximum selections |
 | POST | `/admin/option-groups/:id/options` | Add a choice |
 | PATCH | `/admin/option-groups/:id/options/:optionId` | Edit name, priceDelta, availability or order |
 | GET | `/admin/menu-items/:id/option-groups` | Inspect an item's choices |
@@ -333,8 +336,9 @@ will come with table sessions and orders.
 Public resolution needs no staff login. It returns only `id`, `name` and
 `orderLimit`. An unknown, malformed nonempty or deactivated token returns 404
 with `code: "INVALID_TABLE_QR"`; missing/invalid body fields return 400. Resolving
-does not start a session, open a cart or place an order. The stored limit will
-be enforced by the future order submission flow.
+does not start a session, open a cart or place an order. `POST /tables/open`
+starts the table's provisional session and cart, as described in the next
+section. The stored limit will be enforced by the future order submission flow.
 
 QR links use `CUSTOMER_URL/order#table=TOKEN`. `CUSTOMER_URL` is optional and
 falls back to `CLIENT_URL`; both must be plain origins, with HTTPS in production.
@@ -353,6 +357,113 @@ Import `postman/Enjoyer-tables.postman_collection.json`, set local `email`,
 for the remaining requests. Run requests individually: the collection includes
 deactivation and reactivation checks. Tokens and credentials should stay local.
 
+## Store settings, hours, table sessions and the shared cart
+
+Migration `0005_sessions_carts_settings.sql` adds `settings`, `store_hours`,
+`holiday_overrides`, `table_sessions`, `carts`, `cart_items` and
+`cart_item_options`. It is applied to the configured database. Run
+`npm run db:migrate` when setting up another database.
+
+### Settings
+
+| Method | Path | Permission / purpose |
+| --- | --- | --- |
+| GET | `/admin/settings` | Manager/Owner: read idle timeout, confirmation expiry, timezone |
+| PATCH | `/admin/settings` | Manager/Owner: update one or both timings |
+
+```json
+{ "idleTimeoutMinutes": 180, "confirmationExpiryMinutes": 10 }
+```
+
+`idleTimeoutMinutes` accepts 1–1440; `confirmationExpiryMinutes` accepts 1–120.
+Both are integers. The shop timezone is fixed at `Asia/Manila` and exposed
+read-only. Empty bodies and unknown fields return 400.
+
+### Weekly hours and holiday overrides
+
+| Method | Path | Permission / purpose |
+| --- | --- | --- |
+| GET | `/admin/store-hours` | Manager/Owner: all seven weekdays (Sun=0 … Sat=6) |
+| PUT | `/admin/store-hours/:dayOfWeek` | Manager/Owner: replace one weekday |
+| GET | `/admin/holiday-overrides?from=YYYY-MM-DD&to=YYYY-MM-DD` | Manager/Owner: paginated date overrides |
+| PUT | `/admin/holiday-overrides/:date` | Manager/Owner: create or replace one date |
+| DELETE | `/admin/holiday-overrides/:date` | Manager/Owner: remove one date override |
+
+Open days use `{ "closed": false, "openTime": "08:00", "closeTime": "17:00" }`;
+closed days use `{ "closed": true }`. Times are shop-local 24-hour values,
+close must be later than open, and overnight hours are rejected. Holiday
+overrides take precedence over the weekday schedule.
+
+If no weekday has ever been configured, ordering is unrestricted (`configured:
+false`, open at any time). Once any weekday row exists, weekdays without a row
+are treated as closed.
+
+`GET /store/status` is public and returns `isOpen`, `configured`, `timezone`,
+`localDate`, `localTime`, today’s effective hours, `closesAt`, `nextOpen` and a
+seven-day `week` beginning today. `closesAt`/`nextOpen` are ISO-8601 UTC
+instants; the frontend formats them in shop-local time. Store hours are not yet
+enforced when editing or reading a cart: order placement will reject a closed
+store.
+
+### Opening a table and the shared cart
+
+| Method | Path | Authentication / purpose |
+| --- | --- | --- |
+| POST | `/tables/open` | Public: `{ "token": "QR_TOKEN" }`; create or reuse the session and cart |
+| GET | `/tables/cart` | `X-Table-Token`: current cart with current prices |
+| POST | `/tables/cart/items` | Add a line; requires `version` |
+| PATCH | `/tables/cart/items/:id` | Edit quantity, note or options; requires `version` |
+| DELETE | `/tables/cart/items/:id?version=N` | Remove one line |
+| DELETE | `/tables/cart?version=N` | Clear the cart |
+
+`POST /tables/open` returns the table, the provisional session
+(`status: "pending"`) and its empty or existing cart. Scanning again reuses the
+current non-closed session. A session idle longer than `idleTimeoutMinutes` is
+closed first, so the next customers get a fresh cart. The hourly maintenance
+job also closes idle sessions; cart mutations enforce the timeout inline as a
+race guard. The session becomes `open` only when staff confirm the first order
+in a later phase.
+
+Cart requests send the printed QR token in `X-Table-Token`, never in the URL.
+CORS allows that header for the customer frontend. A malformed, unknown or
+inactive token returns 404 `INVALID_TABLE_QR`; inactive tables are rejected
+before any session work. A valid table with no live session returns 409
+`TABLE_SESSION_REQUIRED`; the customer must scan/open again.
+
+Every mutation includes the cart `version` it last saw. A stale version returns
+409 `CART_VERSION_CONFLICT` with the latest cart in `data`, so the client can
+re-render and retry. Mutations lock the session then the cart, bump the version
+and update the session’s `lastActivityAt`.
+
+Example add body:
+
+```json
+{
+  "menuItemId": 3,
+  "quantity": 2,
+  "optionIds": [5],
+  "note": "no sugar",
+  "version": 0
+}
+```
+
+Adds merge identical item + note + option-set lines and cap each line at 99.
+Option groups are validated server-side against the item’s assigned groups:
+missing selections, too many selections, foreign options and unavailable
+options are rejected. Menu-item and option prices are read at request time; the
+cart stores no price snapshot. Responses include `unitPrice`, `lineTotal`,
+`itemCount`, `subtotal` and `total`, all computed in integer centavos and
+returned as exact two-decimal PHP strings. Hiding an item makes it
+unorderable; sold-out items return 409 `MENU_ITEM_UNAVAILABLE`. Cart lines can
+still be removed when an item becomes unavailable.
+
+Import
+`postman/Enjoyer-sessions-cart.postman_collection.json` to test settings,
+hours, table opening and cart versioning. Set local `email`, `password`,
+`origin`, `tableToken`, `menuItemId` and (optionally) `optionId`, then run the
+login and open requests first; the collection captures `accessToken`,
+`cartVersion` and `cartItemId`.
+
 ## Audit fixes and verification
 
 The two confirmed findings in `AUDIT-2026-11-11.md` have been fixed:
@@ -367,8 +478,9 @@ The two confirmed findings in `AUDIT-2026-11-11.md` have been fixed:
   is required. Unused tokens retain their issuing fingerprint for mismatch logs.
 
 `npm test` now covers the actual backoff middleware, fake-clock expiry/capacity,
-refresh grace/replay regressions and table permissions, validation, public
-resolution, QR formats and printable HTML. `npm run typecheck` also includes all
+refresh grace/replay regressions, table permissions and QR formats, settings
+bounds, weekly/holiday resolution, table opening, cart version conflicts,
+option selection and centavo-exact totals. `npm run typecheck` also includes all
 test files and seed scripts.
 
 For real PostgreSQL concurrency checks, set `ENJOYER_TEST_DATABASE_URL` to a
@@ -387,8 +499,10 @@ locks are real. Tests cover refresh races after a network change, concurrent
 Owner deactivation, one-time password reset consumption, refresh versus logout,
 complete option-assignment replacement and the table lifecycle/constraints.
 
-Verification on 2026-11-11: type check passed, 58 unit/HTTP tests passed, and all
-6 PostgreSQL integration scenarios passed (7 test results including the parent).
+Verification on 2026-11-12: type check passed and 80 unit/HTTP tests passed.
+The Phase 2 HTTP suite covers settings, store hours, holidays, public store
+status, table opening and the shared cart. The PostgreSQL integration suite was
+last verified on 2026-11-11 (7 test results including the parent).
 
 ## Checks
 

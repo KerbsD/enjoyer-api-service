@@ -1,4 +1,4 @@
-import { and, asc, eq, inArray } from "drizzle-orm";
+import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import type { Request, Response } from "express";
 import { db } from "../../db/index.ts";
 import {
@@ -10,8 +10,10 @@ import {
 import { parseId, pgCode } from "../../lib/helpers.ts";
 import { getItemOptionGroups } from "../../lib/menuOptions.ts";
 import { CURRENCY } from "../../configs/currency.ts";
-import type { z } from "zod";
-import type { createOptionGroupSchema } from "../../validators/menuOptions.ts";
+import type {
+  CreateOptionGroupInput,
+  UpdateOptionGroupInput,
+} from "../../validators/menuOptions.ts";
 
 const missing = (res: Response) =>
   res.status(404).json({
@@ -42,16 +44,20 @@ export const listOptionGroups = async (_req: Request, res: Response) => {
 };
 
 export const createOptionGroup = async (req: Request, res: Response) => {
-  const { options, ...input } = req.body as z.infer<
-    typeof createOptionGroupSchema
-  >;
-  // The current admin schema exposes only `required`, so new groups are
-  // single-choice until min/max selections are part of the validator. Keep the
-  // database's required/min_selections invariant satisfied in the meantime.
+  const { options, ...input } = req.body as CreateOptionGroupInput;
+  const minimum = input.minSelections ?? (input.required ? 1 : 0);
+  const maximum = input.maxSelections ?? Math.max(1, minimum);
+  if (minimum > maximum)
+    return res.status(400).json({
+      success: false,
+      message: "maxSelections must be at least minSelections.",
+    });
   const values = {
-    ...input,
-    minSelections: input.required ? 1 : 0,
-    maxSelections: 1,
+    name: input.name,
+    sortOrder: input.sortOrder,
+    required: minimum >= 1,
+    minSelections: minimum,
+    maxSelections: maximum,
   };
   const data = await db.transaction(async (tx) => {
     const [group] = await tx.insert(menuOptionGroups).values(values).returning();
@@ -67,16 +73,51 @@ export const createOptionGroup = async (req: Request, res: Response) => {
 export const updateOptionGroup = async (req: Request, res: Response) => {
   const id = parseId(req.params.id);
   if (!id) return missing(res);
-  const input: Partial<typeof menuOptionGroups.$inferInsert> = {
-    ...(req.body as Record<string, unknown>),
+  const input = req.body as UpdateOptionGroupInput;
+  const [current] = await db
+    .select()
+    .from(menuOptionGroups)
+    .where(eq(menuOptionGroups.id, id))
+    .limit(1);
+  if (!current) return missing(res);
+
+  // minSelections is the source of truth. The legacy `required` flag moves it
+  // between 0 and at least 1 without shrinking a larger multi-select minimum.
+  const minimum =
+    input.minSelections ??
+    (input.required === undefined
+      ? current.minSelections
+      : input.required
+        ? Math.max(1, current.minSelections)
+        : 0);
+  const maximum = input.maxSelections ?? current.maxSelections;
+  if (minimum > maximum)
+    return res.status(400).json({
+      success: false,
+      message: "maxSelections must be at least minSelections.",
+    });
+
+  if (minimum > 0) {
+    const [count] = await db
+      .select({ total: sql<number>`count(*)::int` })
+      .from(menuOptions)
+      .where(eq(menuOptions.groupId, id));
+    if (minimum > (count?.total ?? 0))
+      return res.status(400).json({
+        success: false,
+        message: "minSelections cannot exceed the number of options.",
+      });
+  }
+
+  const values = {
+    ...input,
+    minSelections: minimum,
+    maxSelections: maximum,
+    required: minimum >= 1,
   };
-  // required and min_selections must move together until the API accepts
-  // explicit selection counts.
-  if (typeof input.required === "boolean")
-    input.minSelections = input.required ? 1 : 0;
   const [group] = await db
     .update(menuOptionGroups)
-    .set(input)
+    .set(values)
     .where(eq(menuOptionGroups.id, id))
     .returning();
   return group ? send(res, group) : missing(res);

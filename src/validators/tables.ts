@@ -23,4 +23,5 @@ export const validateUpdateTable = validateBody(updateTableSchema);
 export const validateListTables = validateQuery(listTablesQuerySchema);
 export const validateQrQuery = validateQuery(qrQuerySchema);
 export const validateResolveTable = validateBody(resolveTableSchema);
+export const validateOpenTable = validateBody(resolveTableSchema);
 export type ListTablesQuery = z.infer<typeof listTablesQuerySchema>;

@@ -8,6 +8,12 @@ export const parseId = (value: unknown): number | null => {
   return id > 0 && id <= INT4_MAX ? id : null;
 };
 
+// Weekday path/query value: 0 = Sunday ... 6 = Saturday.
+export const parseDayOfWeek = (value: unknown): number | null => {
+  if (typeof value !== "string" || !/^[0-6]$/.test(value)) return null;
+  return Number(value);
+};
+
 const readStringField = (value: unknown, field: string): string | undefined => {
   if (typeof value !== "object" || value === null) return undefined;
   const hit = (value as Record<string, unknown>)[field];

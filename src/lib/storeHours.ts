@@ -267,9 +267,10 @@ export const resolveStoreStatus = (input: {
 
 export const getStoreStatus = async (
   now = new Date(),
+  settings?: ShopSettings,
 ): Promise<StoreStatus> => {
-  const settings = await readShopSettings();
-  const local = zonedParts(now, settings.shopTimezone);
+  const shopSettings = settings ?? (await readShopSettings());
+  const local = zonedParts(now, shopSettings.shopTimezone);
   const today: LocalDate = {
     year: local.year,
     month: local.month,
@@ -305,5 +306,10 @@ export const getStoreStatus = async (
       .orderBy(asc(holidayOverrides.date)),
   ]);
 
-  return resolveStoreStatus({ now, settings, weekly, holidays });
+  return resolveStoreStatus({
+    now,
+    settings: shopSettings,
+    weekly,
+    holidays,
+  });
 };

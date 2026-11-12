@@ -17,7 +17,7 @@ server.requestTimeout = 120_000;
 void runMaintenance();
 const maintenanceTimer = setInterval(
   () => void runMaintenance(),
-  60 * 60 * 1000,
+  60 * 1000,
 );
 maintenanceTimer.unref();
 

@@ -419,7 +419,7 @@ store.
 `POST /tables/open` returns the table, the provisional session
 (`status: "pending"`) and its empty or existing cart. Scanning again reuses the
 current non-closed session. A session idle longer than `idleTimeoutMinutes` is
-closed first, so the next customers get a fresh cart. The hourly maintenance
+closed first, so the next customers get a fresh cart. The maintenance loop
 job also closes idle sessions; cart mutations enforce the timeout inline as a
 race guard. The session becomes `open` only when staff confirm the first order
 in a later phase.
@@ -464,6 +464,68 @@ hours, table opening and cart versioning. Set local `email`, `password`,
 login and open requests first; the collection captures `accessToken`,
 `cartVersion` and `cartItemId`.
 
+## Orders: placement, confirmation and lifecycle
+
+Migration `0006_smiling_agent_brand.sql` adds the order, order-line, option
+snapshot and daily order-number counter tables. Apply it with
+`npm run db:migrate` before deploying this version.
+
+### Customer orders
+
+All customer endpoints use the printed QR credential in `X-Table-Token` and
+are scoped to the table's current session:
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| POST | `/tables/orders` | Submit the shared cart; body is `{ "version": 3 }` |
+| GET | `/tables/orders` | List this session's orders, total and remaining limit |
+| POST | `/tables/orders/:id/cancel` | Cancel an order while Pending confirmation or Received |
+
+Placement checks store hours, cart version and emptiness, table order limit,
+item/option availability and option-group selection rules in one transaction.
+It snapshots item and option names/prices, clears the cart and increments the
+cart version atomically. A provisional session's first order is
+`pending_confirmation`; after Staff confirms it, the session opens and later
+orders start as `received`. A pending first order counts toward the limit, and
+the customer must wait for confirmation before placing another. Rejected or
+expired orders do not count, and a subsequent order in that still-pending
+session requires confirmation again.
+
+Order numbers are `YYYYMMDD-NNN`, using the shop-local calendar day
+(`Asia/Manila`) and an atomically allocated daily counter. API timestamps are
+ISO-8601 UTC. Amounts are exact two-decimal PHP strings.
+
+### Staff order board and tables
+
+| Method | Path | Permission / purpose |
+| --- | --- | --- |
+| GET | `/staff/orders` | Staff: oldest-first board; optional `status`, `tableId`, `paymentStatus`, `includeCancelled`, `limit`, `offset` |
+| GET | `/staff/orders/:id` | Staff: full order detail |
+| POST | `/staff/orders/:id/confirm` | Staff: confirm first order and open its session |
+| POST | `/staff/orders/:id/reject` | Staff: reject pending first order; optional `{ "reason": "..." }` |
+| POST | `/staff/orders/:id/advance` | Staff: Received → Preparing → Ready → Served |
+| POST | `/staff/orders/:id/revert` | Manager/Owner: move one step back |
+| POST | `/staff/orders/:id/cancel` | Staff: cancel at any status with required `{ "reason": "..." }` |
+| POST | `/staff/orders/:id/paid` | Staff: mark a Served order paid with `{ "method": "cash" }` or `other` |
+| GET | `/staff/tables/overview` | Staff: free/pending/open table status, order count and unpaid amount |
+| GET | `/staff/tables/:tableId/orders` | Staff: current session's full orders |
+| POST | `/staff/tables/:tableId/close` | Staff: close; Manager/Owner must send `{ "overrideUnpaid": true }` to override unpaid warning |
+
+Cancelled orders retain their payment status (`Cancelled — Paid` where
+applicable), but are excluded from order-limit and unpaid totals. Rejected and
+cancelled orders are hidden from the default board list. Staff cancellation
+reasons are required and limited to 500 characters. Marking paid is a separate
+action available only after Served, with `cash` or `other` recorded; there are
+no refunds or online payment flows.
+
+Unconfirmed first orders expire to `rejected` with
+`rejectionReason: "expired"` after the configured confirmation expiry. The
+maintenance loop runs every minute. Idle-session closure still proceeds with
+unpaid orders, which remain visible in historical order data.
+
+Real-time delivery (SSE and polling fallback) is deferred to Phase 4; these
+endpoints return current database state on each request.
+
 ## Audit fixes and verification
 
 The two confirmed findings in `AUDIT-2026-11-11.md` have been fixed:
@@ -499,7 +561,7 @@ locks are real. Tests cover refresh races after a network change, concurrent
 Owner deactivation, one-time password reset consumption, refresh versus logout,
 complete option-assignment replacement and the table lifecycle/constraints.
 
-Verification on 2026-11-12: type check passed and 80 unit/HTTP tests passed.
+Verification on 2026-11-12: type check passed and 82 unit/HTTP tests passed.
 The Phase 2 HTTP suite covers settings, store hours, holidays, public store
 status, table opening and the shared cart. The PostgreSQL integration suite was
 last verified on 2026-11-11 (7 test results including the parent).

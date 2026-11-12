@@ -57,6 +57,13 @@ const { resolveStoreStatus } = await import("../src/lib/storeHours.ts");
 const { validateOptionSelection, summarizeCart } =
   await import("../src/lib/cart.ts");
 const { toCents, fromCents } = await import("../src/lib/money.ts");
+const {
+  orderDateKey,
+  orderNumberFromCounter,
+  NEXT_ORDER_STATUS,
+  PREVIOUS_ORDER_STATUS,
+  isCountedOrder,
+} = await import("../src/lib/orders.ts");
 
 const app = express();
 app.use(express.json());
@@ -334,6 +341,27 @@ test("cart totals use current prices, option deltas and quantities", () => {
     ]),
     { itemCount: 2, subtotal: "300.00", total: "300.00" },
   );
+});
+
+test("order numbers use the shop-local calendar day and a padded daily counter", () => {
+  // 16:30 UTC is already the next calendar day in Manila.
+  const instant = new Date("2026-11-12T16:30:00.000Z");
+  const localDate = orderDateKey(instant, "Asia/Manila");
+  assert.equal(localDate, "2026-11-13");
+  assert.equal(orderNumberFromCounter(localDate.replaceAll("-", ""), 1), "20261113-001");
+  assert.equal(orderNumberFromCounter("20261113", 1200), "20261113-1200");
+});
+
+test("order lifecycle allows only one-step moves and excludes cancelled/rejected from limits", () => {
+  assert.equal(NEXT_ORDER_STATUS.received, "preparing");
+  assert.equal(NEXT_ORDER_STATUS.preparing, "ready");
+  assert.equal(NEXT_ORDER_STATUS.ready, "served");
+  assert.equal(NEXT_ORDER_STATUS.pending_confirmation, undefined);
+  assert.equal(PREVIOUS_ORDER_STATUS.served, "ready");
+  assert.equal(PREVIOUS_ORDER_STATUS.received, undefined);
+  assert.equal(isCountedOrder("pending_confirmation"), true);
+  assert.equal(isCountedOrder("cancelled"), false);
+  assert.equal(isCountedOrder("rejected"), false);
 });
 
 // ---------- Store status (pure) ----------

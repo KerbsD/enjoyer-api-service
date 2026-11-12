@@ -163,18 +163,16 @@ const itemView = (line: CartLine): CartItemView => {
   };
 };
 
-// Reads the shared cart exactly as the customer should see it: current menu
-// prices, selected options, and server-computed totals. The caller scopes the
-// cart to the requesting table token before calling this.
-export const loadCartView = async (cartId: string): Promise<CartView> => {
-  const [cart] = await db
-    .select()
-    .from(carts)
-    .where(eq(carts.id, cartId))
-    .limit(1);
-  if (!cart) throw new Error("cart not found");
+// Reads the cart lines exactly as the customer should see them, using current
+// menu prices. Pass the active transaction when this runs inside a mutation so
+// the lines are read under the same locks; pass db for a plain read.
+export type DbReader = Pick<DbTransaction, "select">;
 
-  const rows = await db
+export const loadCartLines = async (
+  executor: DbReader,
+  cartId: string,
+): Promise<CartItemView[]> => {
+  const rows = await executor
     .select({
       id: cartItems.id,
       quantity: cartItems.quantity,
@@ -192,7 +190,7 @@ export const loadCartView = async (cartId: string): Promise<CartView> => {
 
   const ids = rows.map((row) => row.id);
   const optionRows = ids.length
-    ? await db
+    ? await executor
         .select({
           cartItemId: cartItemOptions.cartItemId,
           id: menuOptions.id,
@@ -248,12 +246,28 @@ export const loadCartView = async (cartId: string): Promise<CartView> => {
     options: optionsByItem.get(row.id) ?? [],
   }));
 
+  return lines.map(itemView);
+};
+
+// Reads the shared cart exactly as the customer should see it: current menu
+// prices, selected options, and server-computed totals. The caller scopes the
+// cart to the requesting table token before calling this.
+export const loadCartView = async (cartId: string): Promise<CartView> => {
+  const [cart] = await db
+    .select()
+    .from(carts)
+    .where(eq(carts.id, cartId))
+    .limit(1);
+  if (!cart) throw new Error("cart not found");
+
+  const items = await loadCartLines(db, cartId);
+
   return {
     id: cart.id,
     version: cart.version,
     updatedAt: cart.updatedAt.toISOString(),
-    items: lines.map(itemView),
-    totals: summarizeCart(lines),
+    items,
+    totals: summarizeCart(items),
   };
 };
 

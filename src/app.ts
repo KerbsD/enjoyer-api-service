@@ -36,6 +36,9 @@ import adminSettingsRoute from "./routes/settings/admin.ts";
 import adminStoreHoursRoute from "./routes/storeHours/admin.ts";
 import adminHolidayOverridesRoute from "./routes/storeHours/holidays.ts";
 import { getPublicStoreStatus } from "./controllers/storeHours/public.ts";
+import publicOrdersRoute from "./routes/orders/public.ts";
+import staffOrdersRoute from "./routes/orders/staff.ts";
+import staffOrderTablesRoute from "./routes/orders/tables.ts";
 
 const app = express();
 if (env.TRUST_PROXY_HOPS > 0) app.set("trust proxy", env.TRUST_PROXY_HOPS);
@@ -82,6 +85,7 @@ app.use("/auth/invite", inviteRoute);
 app.get("/menu", handlePublicMenu);
 app.get("/store/status", getPublicStoreStatus);
 app.use("/tables/cart", publicCartRoute);
+app.use("/tables/orders", publicOrdersRoute);
 app.use("/tables", publicTablesRoute);
 
 app.use(verifyJwt);
@@ -94,6 +98,8 @@ app.use("/admin/menu-items", adminMenuItemsRoute);
 app.use("/staff/menu-items", staffMenuItemsRoute);
 app.use("/admin/tables", adminTablesRoute);
 app.use("/staff/tables", staffTablesRoute);
+app.use("/staff/orders", staffOrdersRoute);
+app.use("/staff/tables", staffOrderTablesRoute);
 app.use("/admin/settings", adminSettingsRoute);
 app.use("/admin/store-hours", adminStoreHoursRoute);
 app.use("/admin/holiday-overrides", adminHolidayOverridesRoute);

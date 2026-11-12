@@ -581,3 +581,273 @@ export const cartItemOptions = pgTable(
 
 export type CartItemOption = typeof cartItemOptions.$inferSelect;
 export type NewCartItemOption = typeof cartItemOptions.$inferInsert;
+
+// ---------- Orders ----------
+
+// The status values from specs.md section 4. "pending_confirmation" only ever
+// belongs to an order placed before the table session is open; confirming it
+// opens the session. "rejected" is only for a first order that staff rejected
+// or that expired unconfirmed.
+export const ORDER_STATUSES = [
+  "pending_confirmation",
+  "received",
+  "preparing",
+  "ready",
+  "served",
+  "cancelled",
+  "rejected",
+] as const;
+export type OrderStatus = (typeof ORDER_STATUSES)[number];
+export const orderStatus = pgEnum("order_status", ORDER_STATUSES);
+
+// Payment is separate from the order lifecycle: a cancelled order can still be
+// Paid, and a Served order can still be Unpaid.
+export const PAYMENT_STATUSES = ["unpaid", "paid"] as const;
+export type PaymentStatus = (typeof PAYMENT_STATUSES)[number];
+export const orderPaymentStatus = pgEnum(
+  "order_payment_status",
+  PAYMENT_STATUSES,
+);
+
+// The spec records the method staff took at the counter. There is no online
+// payment, so these are the only two choices.
+export const PAYMENT_METHODS = ["cash", "other"] as const;
+export type PaymentMethod = (typeof PAYMENT_METHODS)[number];
+export const orderPaymentMethod = pgEnum(
+  "order_payment_method",
+  PAYMENT_METHODS,
+);
+
+// Who cancelled. Staff cancellations always carry a reason; customer
+// cancellations do not need one.
+export const ORDER_CANCELLED_BY = ["customer", "staff"] as const;
+export type OrderCancelledBy = (typeof ORDER_CANCELLED_BY)[number];
+export const orderCancelledBy = pgEnum(
+  "order_cancelled_by",
+  ORDER_CANCELLED_BY,
+);
+
+// One row per shop-local calendar day. Order numbers are YYYYMMDD-NNN, so the
+// counter resets at local midnight and never repeats on the same day. The row
+// is locked by the insert/upsert until the placing transaction commits.
+export const orderNumberCounters = pgTable(
+  "order_number_counters",
+  {
+    date: date("date", { mode: "string" }).primaryKey(),
+    counter: integer("counter").notNull(),
+  },
+  (table) => [
+    check("order_number_counters_counter_check", sql`${table.counter} > 0`),
+  ],
+);
+
+export type OrderNumberCounter = typeof orderNumberCounters.$inferSelect;
+
+// An order is a snapshotted cart. Names and prices are copied onto the lines so
+// later menu edits never change what the customer ordered or what they owe.
+export const orders = pgTable(
+  "orders",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    // Human-facing number: shop-local date plus a daily counter.
+    orderNumber: text("order_number").notNull().unique(),
+    tableSessionId: uuid("table_session_id")
+      .notNull()
+      .references(() => tableSessions.id, { onDelete: "restrict" }),
+    // Denormalized for table history and exports; the session keeps the
+    // authoritative visit lifecycle.
+    tableId: integer("table_id")
+      .notNull()
+      .references(() => shopTables.id, { onDelete: "restrict" }),
+    status: orderStatus("status").notNull(),
+    // Integer-centavo math is done in the API; these exact decimals are the
+    // PHP amounts shown to the customer and stored for reporting.
+    subtotal: numeric("subtotal", { precision: 10, scale: 2 }).notNull(),
+    total: numeric("total", { precision: 10, scale: 2 }).notNull(),
+    paymentStatus: orderPaymentStatus("payment_status")
+      .notNull()
+      .default("unpaid"),
+    paymentMethod: orderPaymentMethod("payment_method"),
+    paidAt: timestamp("paid_at", { withTimezone: true }),
+    paidByUserId: integer("paid_by_user_id").references(() => users.id, {
+      onDelete: "set null",
+    }),
+
+    // Set when staff confirm a pending first order (which opens the session).
+    confirmedAt: timestamp("confirmed_at", { withTimezone: true }),
+
+    // Customer cancellations can be requested without a reason; staff must
+    // supply one. cancelledByUserId is null for customer cancellations.
+    cancellationReason: text("cancellation_reason"),
+    cancelledAt: timestamp("cancelled_at", { withTimezone: true }),
+    cancelledBy: orderCancelledBy("cancelled_by"),
+    cancelledByUserId: integer("cancelled_by_user_id").references(
+      () => users.id,
+      { onDelete: "set null" },
+    ),
+
+    // "expired" is written by the unconfirmed-order job. A staff rejection may
+    // optionally include free text.
+    rejectionReason: text("rejection_reason"),
+
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (table) => [
+    index("orders_session_created_idx").on(
+      table.tableSessionId,
+      table.createdAt,
+      table.id,
+    ),
+    // The live board reads active statuses oldest first.
+    index("orders_status_created_idx").on(
+      table.status,
+      table.createdAt,
+      table.id,
+    ),
+    index("orders_table_created_idx").on(table.tableId, table.createdAt),
+    check(
+      "orders_order_number_check",
+      sql`${table.orderNumber} ~ '^[0-9]{8}-[0-9]{3,}$'`,
+    ),
+    check(
+      "orders_totals_check",
+      sql`${table.subtotal} >= 0 and ${table.subtotal} <= 99999999.99
+        and ${table.total} >= 0 and ${table.total} <= 99999999.99
+        and ${table.total} = ${table.subtotal}`,
+    ),
+    // Paid means method and timestamp are both recorded. Unpaid means exactly
+    // the opposite. paidByUserId may become null if that account is deleted.
+    check(
+      "orders_payment_check",
+      sql`case when ${table.paymentStatus} = 'unpaid'
+        then ${table.paymentMethod} is null and ${table.paidAt} is null
+          and ${table.paidByUserId} is null
+        else ${table.paymentMethod} is not null and ${table.paidAt} is not null
+      end`,
+    ),
+    check(
+      "orders_cancelled_check",
+      sql`case when ${table.status} = 'cancelled'
+        then ${table.cancelledAt} is not null and ${table.cancelledBy} is not null
+        else ${table.cancelledAt} is null and ${table.cancelledBy} is null
+          and ${table.cancelledByUserId} is null
+          and ${table.cancellationReason} is null
+      end`,
+    ),
+    check(
+      "orders_staff_cancel_reason_check",
+      sql`${table.cancelledBy} is distinct from 'staff'
+        or ${table.cancellationReason} is not null`,
+    ),
+    check(
+      "orders_cancellation_reason_length_check",
+      sql`char_length(${table.cancellationReason}) <= 500`,
+    ),
+    check(
+      "orders_rejection_check",
+      sql`case when ${table.status} = 'rejected'
+        then true
+        else ${table.rejectionReason} is null
+      end`,
+    ),
+    check(
+      "orders_rejection_reason_length_check",
+      sql`char_length(${table.rejectionReason}) <= 500`,
+    ),
+  ],
+);
+
+export type Order = typeof orders.$inferSelect;
+export type NewOrder = typeof orders.$inferInsert;
+
+// One snapshot line per cart line. unitPriceSnapshot is the base menu price;
+// lineTotal includes option deltas multiplied by quantity.
+export const orderItems = pgTable(
+  "order_items",
+  {
+    id: serial("id").primaryKey(),
+    orderId: uuid("order_id")
+      .notNull()
+      .references(() => orders.id, { onDelete: "cascade" }),
+    menuItemId: integer("menu_item_id")
+      .notNull()
+      .references(() => menuItems.id, { onDelete: "restrict" }),
+    nameSnapshot: text("name_snapshot").notNull(),
+    unitPriceSnapshot: numeric("unit_price_snapshot", {
+      precision: 10,
+      scale: 2,
+    }).notNull(),
+    quantity: integer("quantity").notNull(),
+    note: text("note").notNull().default(""),
+    lineTotal: numeric("line_total", { precision: 10, scale: 2 }).notNull(),
+  },
+  (table) => [
+    index("order_items_order_idx").on(table.orderId, table.id),
+    check(
+      "order_items_name_length_check",
+      sql`char_length(btrim(${table.nameSnapshot})) between 1 and 100`,
+    ),
+    check(
+      "order_items_unit_price_check",
+      sql`${table.unitPriceSnapshot} >= 0
+        and ${table.unitPriceSnapshot} <= 99999999.99`,
+    ),
+    check("order_items_quantity_check", sql`${table.quantity} between 1 and 99`),
+    check(
+      "order_items_note_length_check",
+      sql`char_length(${table.note}) <= 500`,
+    ),
+    check(
+      "order_items_line_total_check",
+      sql`${table.lineTotal} >= 0 and ${table.lineTotal} <= 99999999.99`,
+    ),
+  ],
+);
+
+export type OrderItem = typeof orderItems.$inferSelect;
+export type NewOrderItem = typeof orderItems.$inferInsert;
+
+// Selected options are snapshotted too, including group and price delta.
+export const orderItemOptions = pgTable(
+  "order_item_options",
+  {
+    id: serial("id").primaryKey(),
+    orderItemId: integer("order_item_id")
+      .notNull()
+      .references(() => orderItems.id, { onDelete: "cascade" }),
+    optionId: integer("option_id")
+      .notNull()
+      .references(() => menuOptions.id, { onDelete: "restrict" }),
+    nameSnapshot: text("name_snapshot").notNull(),
+    groupNameSnapshot: text("group_name_snapshot").notNull(),
+    priceDeltaSnapshot: numeric("price_delta_snapshot", {
+      precision: 10,
+      scale: 2,
+    }).notNull(),
+  },
+  (table) => [
+    uniqueIndex("order_item_options_unique_idx").on(
+      table.orderItemId,
+      table.optionId,
+    ),
+    check(
+      "order_item_options_name_length_check",
+      sql`char_length(btrim(${table.nameSnapshot})) between 1 and 100
+        and char_length(btrim(${table.groupNameSnapshot})) between 1 and 100`,
+    ),
+    check(
+      "order_item_options_price_check",
+      sql`${table.priceDeltaSnapshot} >= 0
+        and ${table.priceDeltaSnapshot} <= 99999999.99`,
+    ),
+  ],
+);
+
+export type OrderItemOption = typeof orderItemOptions.$inferSelect;
+export type NewOrderItemOption = typeof orderItemOptions.$inferInsert;

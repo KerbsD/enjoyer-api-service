@@ -36,7 +36,6 @@ export const listOptionGroups = async (_req: Request, res: Response) => {
     res,
     groups.map((group) => ({
       ...group,
-      maxSelections: 1,
       options: options.filter((o) => o.groupId === group.id),
     })),
   );
@@ -46,13 +45,21 @@ export const createOptionGroup = async (req: Request, res: Response) => {
   const { options, ...input } = req.body as z.infer<
     typeof createOptionGroupSchema
   >;
+  // The current admin schema exposes only `required`, so new groups are
+  // single-choice until min/max selections are part of the validator. Keep the
+  // database's required/min_selections invariant satisfied in the meantime.
+  const values = {
+    ...input,
+    minSelections: input.required ? 1 : 0,
+    maxSelections: 1,
+  };
   const data = await db.transaction(async (tx) => {
-    const [group] = await tx.insert(menuOptionGroups).values(input).returning();
+    const [group] = await tx.insert(menuOptionGroups).values(values).returning();
     const created = await tx
       .insert(menuOptions)
       .values(options.map((option) => ({ ...option, groupId: group.id })))
       .returning();
-    return { ...group, maxSelections: 1, options: created };
+    return { ...group, options: created };
   });
   return send(res.status(201), data);
 };
@@ -60,12 +67,19 @@ export const createOptionGroup = async (req: Request, res: Response) => {
 export const updateOptionGroup = async (req: Request, res: Response) => {
   const id = parseId(req.params.id);
   if (!id) return missing(res);
+  const input: Partial<typeof menuOptionGroups.$inferInsert> = {
+    ...(req.body as Record<string, unknown>),
+  };
+  // required and min_selections must move together until the API accepts
+  // explicit selection counts.
+  if (typeof input.required === "boolean")
+    input.minSelections = input.required ? 1 : 0;
   const [group] = await db
     .update(menuOptionGroups)
-    .set(req.body)
+    .set(input)
     .where(eq(menuOptionGroups.id, id))
     .returning();
-  return group ? send(res, { ...group, maxSelections: 1 }) : missing(res);
+  return group ? send(res, group) : missing(res);
 };
 
 export const createOption = async (req: Request, res: Response) => {

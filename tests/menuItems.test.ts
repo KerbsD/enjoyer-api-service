@@ -319,7 +319,7 @@ test("public menu needs no login, excludes hidden items and retains sold-out ite
       [2, "Sandwiches", 0, 6, "Chicken", "", "350.00", true, true, 1],
       [3, "Pastries", 1, 7, "Croissant", "", "130.00", false, true, 0],
     ],
-    [[5, 1, "Sandwich extras", false, 0, 1, "Side Fries", "60.00", true, 0]],
+    [[5, 1, "Sandwich extras", false, 0, 1, 0, 1, "Side Fries", "60.00", true, 0]],
   );
   const result = await request("GET", "/menu?isHidden=true", undefined, null);
   assert.equal(result.status, 200);
@@ -369,7 +369,7 @@ test("option groups require menu permission and validate choices", async () => {
   }
   setup(
     account(),
-    [[1, "Temperature", true, 0]],
+    [[1, "Temperature", true, 1, 1, 0]],
     [
       [1, 1, "Hot", "0.00", true, 0],
       [2, 1, "Iced", "0.00", true, 0],
@@ -386,7 +386,7 @@ test("option groups require menu permission and validate choices", async () => {
   assert.ok(queries.some((q) => q.text === "commit"));
 });
 test("failed option creation rolls back the group", async () => {
-  setup(account(), [[1, "Milk", false, 0]], new Error("insert failed"));
+  setup(account(), [[1, "Milk", false, 0, 1, 0]], new Error("insert failed"));
   assert.equal(
     (
       await request("POST", "/admin/option-groups", {

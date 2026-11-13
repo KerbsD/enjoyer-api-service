@@ -1,0 +1,73 @@
+{
+  "info": {
+    "name": "Enjoyer — Reports (Phase 5)",
+    "description": "Manager/Owner dashboard, order history, detail and CSV export. Login first and set accessToken.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:3000" },
+    { "key": "accessToken", "value": "" },
+    { "key": "orderId", "value": "" },
+    { "key": "from", "value": "2026-11-01" },
+    { "key": "to", "value": "2026-11-30" }
+  ],
+  "item": [
+    {
+      "name": "Dashboard — today",
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }],
+        "url": "{{baseUrl}}/admin/dashboard?period=today"
+      }
+    },
+    {
+      "name": "Dashboard — 7 days",
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }],
+        "url": "{{baseUrl}}/admin/dashboard?period=7days"
+      }
+    },
+    {
+      "name": "Dashboard — custom range",
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }],
+        "url": "{{baseUrl}}/admin/dashboard?from={{from}}&to={{to}}"
+      }
+    },
+    {
+      "name": "Order history — all statuses",
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }],
+        "url": "{{baseUrl}}/admin/orders?from={{from}}&to={{to}}&limit=50&offset=0"
+      },
+      "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["if (pm.response.code === 200) { const rows = pm.response.json().data; if (rows.length) pm.collectionVariables.set('orderId', rows[0].id); }"] } }]
+    },
+    {
+      "name": "History filters — table, status, payment, item and search",
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }],
+        "url": "{{baseUrl}}/admin/orders?tableId=1&status=served&paymentStatus=paid&itemId=1&q=Latte"
+      }
+    },
+    {
+      "name": "Order detail",
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }],
+        "url": "{{baseUrl}}/admin/orders/{{orderId}}"
+      }
+    },
+    {
+      "name": "Export all orders as CSV",
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }],
+        "url": "{{baseUrl}}/admin/exports/orders.csv?from={{from}}&to={{to}}"
+      }
+    }
+  ]
+}

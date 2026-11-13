@@ -641,6 +641,52 @@ Unit/HTTP tests cover streaming, isolation, access expiry, cleanup, parsing and
 fallback. The opt-in PostgreSQL suite also checks commit/rollback visibility
 and cross-session isolation against the real revision SQL.
 
+## Phase 5: dashboard, order history and export
+
+These manager features use shop-local calendar dates (`Asia/Manila`) and query
+UTC instants with inclusive start/exclusive next-day boundaries. No migration
+or new package is required. The requested export formats are XLSX **or** CSV;
+CSV is implemented to keep the service dependency-free.
+
+| Method | Path | Permission / purpose |
+| --- | --- | --- |
+| GET | `/admin/dashboard?period=today` | Manager/Owner: totals, paid revenue, best sellers, peak hours and status breakdown |
+| GET | `/admin/dashboard?period=7days` | Rolling seven shop-local dates ending today |
+| GET | `/admin/dashboard?period=30days` | Rolling 30 shop-local dates ending today |
+| GET | `/admin/dashboard?from=YYYY-MM-DD&to=YYYY-MM-DD` | Dashboard for an inclusive custom date range |
+| GET | `/admin/orders` | Paginated order history and filters |
+| GET | `/admin/orders/:id` | Full order detail, including snapshotted item/options/notes |
+| GET | `/admin/exports/orders.csv?from=YYYY-MM-DD&to=YYYY-MM-DD` | CSV export of every order in the inclusive date range |
+
+Dashboard defaults to `today`; supply either a named period or both `from` and
+`to`, not both kinds. Dashboard data includes `totalOrders`, `revenue`,
+`paidOrders`, `unpaidOrders`, status counts, the ten highest-quantity sellers,
+and all 24 shop-local peak-hour buckets. Revenue sums Paid orders, including
+Paid cancelled orders. Unpaid counts exclude cancelled and rejected orders.
+Best sellers and peak hours exclude cancelled/rejected orders; total-order
+count and status breakdown include them so cancellations/rejections remain
+visible in operational totals. Item revenue uses order-line snapshots and
+includes option/add-on amounts.
+
+Order history accepts optional paired `from`/`to`, `tableId`, `status`,
+`paymentStatus`, `itemId`, `q`, `limit` (1–100, default 50), and `offset`.
+`q` searches order number, table name and snapshotted item name. With no status
+filter, all statuses—including cancelled and rejected—are included. Details
+use stored snapshots, so later menu/table edits do not rewrite past order data.
+
+The CSV export requires both valid calendar dates and includes **all** orders,
+including rejected and cancelled rows. Columns include order ID/number, UTC
+created time, table, item/add-on/note summary, PHP total, payment status/method,
+and a cancelled flag. Rows are streamed in batches; formula-leading text is
+neutralized and CSV cells are quoted. The output uses UTF-8 with BOM for common
+spreadsheet compatibility.
+
+The spec mentions an activity log only as an additional feature without a
+detailed story or rules. It is intentionally not included in this phase; its
+events, retention, visibility and filtering need product decisions first.
+Import `postman/Enjoyer-reports.postman_collection.json` to exercise the
+dashboard presets/custom range, history filters/detail and CSV download.
+
 ## Audit fixes and verification
 
 The two confirmed findings in `AUDIT-2026-11-11.md` have been fixed:
@@ -676,10 +722,10 @@ locks are real. Tests cover refresh races after a network change, concurrent
 Owner deactivation, one-time password reset consumption, refresh versus logout,
 complete option-assignment replacement and the table lifecycle/constraints.
 
-Verification on 2026-11-12: type check passed and 93 unit/HTTP tests passed.
-The Phase 4 revision SQL was also verified read-only against the configured
-PostgreSQL database. The isolated integration suite remains skipped without
-`ENJOYER_TEST_DATABASE_URL`.
+Verification on 2026-11-13: type check passed and 98 unit/HTTP tests passed.
+The Phase 4 revision SQL and Phase 5 dashboard/history SQL were verified
+read-only against the configured PostgreSQL database. The isolated integration
+suite remains skipped without `ENJOYER_TEST_DATABASE_URL`.
 The Phase 2 HTTP suite covers settings, store hours, holidays, public store
 status, table opening and the shared cart. The PostgreSQL integration suite was
 last verified on 2026-11-11 (7 test results including the parent).

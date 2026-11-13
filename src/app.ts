@@ -40,6 +40,7 @@ import publicOrdersRoute from "./routes/orders/public.ts";
 import staffOrdersRoute from "./routes/orders/staff.ts";
 import staffOrderTablesRoute from "./routes/orders/tables.ts";
 import { staffRealtime, tableRealtime } from "./routes/realtime.ts";
+import { dashboardRoute, exportRoute, historyRoute } from "./routes/reports/admin.ts";
 
 const app = express();
 if (env.TRUST_PROXY_HOPS > 0) app.set("trust proxy", env.TRUST_PROXY_HOPS);
@@ -108,6 +109,9 @@ app.use("/staff/tables", staffOrderTablesRoute);
 app.use("/admin/settings", adminSettingsRoute);
 app.use("/admin/store-hours", adminStoreHoursRoute);
 app.use("/admin/holiday-overrides", adminHolidayOverridesRoute);
+app.use("/admin/dashboard", dashboardRoute);
+app.use("/admin/orders", historyRoute);
+app.use("/admin/exports", exportRoute);
 
 // Everything below needs a valid access token. Guard each route with
 // requirePermission("...") from src/middlewares/requirePermission.ts, e.g.

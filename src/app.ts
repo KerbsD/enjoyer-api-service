@@ -39,6 +39,7 @@ import { getPublicStoreStatus } from "./controllers/storeHours/public.ts";
 import publicOrdersRoute from "./routes/orders/public.ts";
 import staffOrdersRoute from "./routes/orders/staff.ts";
 import staffOrderTablesRoute from "./routes/orders/tables.ts";
+import { staffRealtime, tableRealtime } from "./routes/realtime.ts";
 
 const app = express();
 if (env.TRUST_PROXY_HOPS > 0) app.set("trust proxy", env.TRUST_PROXY_HOPS);
@@ -70,6 +71,10 @@ app.get("/health/ready", async (_req, res) => {
   res.status(dbReadiness.ok ? 200 : 503).json({ ok: dbReadiness.ok });
 });
 
+// Realtime routes have their own NAT-friendly IP and authenticated quotas.
+// Both routers authenticate independently before sending any data.
+app.use("/tables/realtime", tableRealtime);
+app.use("/staff/realtime", staffRealtime);
 app.use(globalLimiter);
 
 // Staff authentication. There is no public sign-up: accounts are created by

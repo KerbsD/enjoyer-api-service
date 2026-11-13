@@ -523,8 +523,123 @@ Unconfirmed first orders expire to `rejected` with
 maintenance loop runs every minute. Idle-session closure still proceeds with
 unpaid orders, which remain visible in historical order data.
 
-Real-time delivery (SSE and polling fallback) is deferred to Phase 4; these
-endpoints return current database state on each request.
+See Phase 4 below for SSE delivery and polling fallback for these resources.
+
+## Phase 4: live updates (SSE and polling fallback)
+
+No new migration or environment variables are required. The API detects
+committed database changes every **two seconds while watched**, sharing one
+check per audience/session per API process. This works with pooled Neon
+connections and multiple API instances; it also catches maintenance jobs,
+expiry, idle closures, and menu edits without controller-specific publishing.
+Nothing is emitted for a rolled-back write. Checks do not extend table idle
+timeouts. Each check returns bounded fingerprints; computing staff order
+fingerprints scans order history, so review query cost as that history grows.
+
+| Method | Path | Authentication |
+| --- | --- | --- |
+| GET | `/staff/realtime/events` | Bearer access token, Staff/Manager/Owner |
+| GET | `/staff/realtime/changes?since=REVISION` | Same; polling fallback |
+| GET | `/tables/realtime/events?sessionId=UUID` | `X-Table-Token`, original session ID from `/tables/open` |
+| GET | `/tables/realtime/changes?sessionId=UUID&since=REVISION` | Same; polling fallback |
+
+`since` is optional on polling requests. A matching revision returns **204**;
+otherwise **200** returns `{ success: true, data: { revision, resources,
+scope, pollIntervalMs: 5000 } }`. Revisions are opaque content fingerprints,
+not ordered sequence numbers. Never put JWTs or QR tokens in query strings.
+The existing CORS allowlist permits both authentication headers.
+
+### SSE protocol
+
+Streams return `text/event-stream`, `Cache-Control: no-store, no-transform`
+and `X-Accel-Buffering: no`. Proxy buffering/compression must be disabled for
+these routes; allow idle connections longer than the 15-second heartbeat.
+
+* `sync`: always the first data event after authorization. Refetch all resources
+  for this audience, including after reconnect. No durable event replay or
+  `Last-Event-ID` cursor is used.
+* `change`: contains the latest revision, resource fingerprints, and a `changed`
+  array. Multiple writes may coalesce into one invalidation.
+* `access-ended`: credentials expired, account/table deactivated, or the
+  original session closed/expired. Contains `status`, `code`, and `message`,
+  then the connection ends.
+* `unavailable`: database/read failure; switch to polling with backoff.
+* `reconnect`: shutdown or periodic connection rotation; reconnect/resync.
+* `: heartbeat`: comment every 15 seconds; ignore it as application data.
+
+Example data frame:
+
+```text
+event: change
+data: {"revision":"<opaque hash>","resources":{"orders":"...","tables":"...","menu":"...","store":"...","cart":"..."},"changed":["cart"],"scope":{"kind":"table","tableId":1,"sessionId":"..."},"pollIntervalMs":5000}
+
+```
+
+Resource invalidations tell the frontend which existing GETs to refetch:
+
+| Changed resource | Customer refresh | Staff refresh |
+| --- | --- | --- |
+| `cart` | `/tables/cart` | Not sent to staff |
+| `orders` | `/tables/orders` | `/staff/orders` and `/staff/tables/overview`; open order/table details |
+| `tables` | `/tables/orders` and table context | Table overview, board table labels, open table details |
+| `menu` | `/menu` **and** `/tables/cart` (live prices/availability) | Menu/sold-out controls |
+| `store` | `/store/status` | Settings/hours if displayed |
+
+Store invalidation includes minute boundaries, so open/closed hours refresh
+without a database edit. Customer fingerprints are scoped to the original
+session; they include no other table's cart or orders. Staff access and JWT
+expiry, customer QR validity and session lifetime are rechecked before each
+data delivery. Closed sessions cannot roll over to a later visit on reconnect.
+Slow readers are disconnected rather than accumulating response buffers.
+Streams close cleanly on shutdown and rotate after 30 minutes. Per-process
+limits are 500 total streams and 20 per account/table. Realtime routes use
+separate NAT-friendly rate limits for five-second fallback polling.
+
+### Browser integration
+
+`src/client/realtime.ts` exports the dependency-free, browser-compatible
+`watchRealtime` helper. Import/copy it into the frontend. It uses streaming
+`fetch` to support headers, handles UTF-8 SSE framing, detects stalled streams,
+falls back to five-second polling with error backoff, and retries SSE every
+30 seconds while polling. `stop()`/`AbortSignal` cancels requests and timers.
+Only advance the client revision after the resource refresh succeeds.
+
+```ts
+const watcher = watchRealtime({
+  url: `${apiUrl}/tables/realtime?sessionId=${session.id}`,
+  headers: () => ({ "X-Table-Token": tableToken }),
+  async onChange(state, changed) {
+    // Await the fetch AND application of the results to your UI state.
+    if (changed.includes("cart") || changed.includes("menu")) await refreshCart();
+    if (changed.includes("orders") || changed.includes("tables")) await refreshOrders();
+    if (changed.includes("menu")) await refreshMenu();
+    if (changed.includes("store")) await refreshStoreStatus();
+  },
+  onAccessEnded(failure) {
+    // TABLE_SESSION_REQUIRED / INVALID_TABLE_QR: show the scan/ask-staff flow.
+    showSessionEnded(failure.message);
+  },
+});
+// On page teardown:
+watcher.stop();
+```
+
+Staff use `${apiUrl}/staff/realtime` and an `Authorization: Bearer ...` header.
+On `AUTH_REQUIRED` (401), use the existing refresh/login flow and start a new
+watcher with the new token. The helper stops on 401/403/404/409 rather than
+retrying invalid credentials indefinitely. It does not refresh login cookies
+itself. Native `EventSource` is unsuitable because it cannot set these headers.
+
+For board sound/visual alerts, compare newly fetched order IDs against the
+previous board state. Treat initial load/reconnect as a baseline, not a burst
+of new-order alerts. Actual sound playback and UI rendering belong to the
+frontend; these events invalidate API data rather than carrying UI commands.
+
+Import `postman/Enjoyer-realtime.postman_collection.json` for stream/poll
+requests. The polling requests save revision values for subsequent 204 checks.
+Unit/HTTP tests cover streaming, isolation, access expiry, cleanup, parsing and
+fallback. The opt-in PostgreSQL suite also checks commit/rollback visibility
+and cross-session isolation against the real revision SQL.
 
 ## Audit fixes and verification
 
@@ -561,7 +676,10 @@ locks are real. Tests cover refresh races after a network change, concurrent
 Owner deactivation, one-time password reset consumption, refresh versus logout,
 complete option-assignment replacement and the table lifecycle/constraints.
 
-Verification on 2026-11-12: type check passed and 82 unit/HTTP tests passed.
+Verification on 2026-11-12: type check passed and 93 unit/HTTP tests passed.
+The Phase 4 revision SQL was also verified read-only against the configured
+PostgreSQL database. The isolated integration suite remains skipped without
+`ENJOYER_TEST_DATABASE_URL`.
 The Phase 2 HTTP suite covers settings, store hours, holidays, public store
 status, table opening and the shared cart. The PostgreSQL integration suite was
 last verified on 2026-11-11 (7 test results including the parent).

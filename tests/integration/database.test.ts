@@ -162,6 +162,50 @@ test(
     }
     const fingerprint = { ip: "192.0.2.1", userAgent: "IntegrationBrowser" };
 
+    await t.test("realtime sees committed changes across connections and isolates table sessions", async () => {
+      const { readRevisions } = await import("../../src/lib/realtime/revisions.ts");
+      const { tableSessions, carts, orders } = await import("../../src/db/schema.ts");
+      const [tableA, tableB] = await db.insert(shopTables).values([
+        { name: "Realtime A", qrToken: newToken() },
+        { name: "Realtime B", qrToken: newToken() },
+      ]).returning();
+      const [sessionA] = await db.insert(tableSessions).values({ tableId: tableA.id }).returning();
+      const [sessionB] = await db.insert(tableSessions).values({ tableId: tableB.id }).returning();
+      const [cartA] = await db.insert(carts).values({ tableSessionId: sessionA.id }).returning();
+      await db.insert(carts).values({ tableSessionId: sessionB.id });
+      const scopeA = { kind: "table" as const, tableId: tableA.id, sessionId: sessionA.id };
+      const scopeB = { kind: "table" as const, tableId: tableB.id, sessionId: sessionB.id };
+      const beforeA = await readRevisions(scopeA);
+      const beforeB = await readRevisions(scopeB);
+      const beforeStaff = await readRevisions({ kind: "staff" });
+      const writer = await pool.connect();
+      try {
+        await writer.query("begin");
+        await writer.query('update carts set version = version + 1 where id = $1', [cartA.id]);
+        assert.equal((await readRevisions(scopeA)).resources.cart, beforeA.resources.cart);
+        await writer.query("rollback");
+        assert.equal((await readRevisions(scopeA)).resources.cart, beforeA.resources.cart);
+        await writer.query("begin");
+        await writer.query('update carts set version = version + 1 where id = $1', [cartA.id]);
+        await writer.query("commit");
+      } finally { await writer.query("rollback"); writer.release(); }
+      assert.notEqual((await readRevisions(scopeA)).resources.cart, beforeA.resources.cart);
+      assert.equal((await readRevisions(scopeB)).resources.cart, beforeB.resources.cart);
+
+      const [order] = await db.insert(orders).values({
+        orderNumber: "20261112-001", tableId: tableA.id, tableSessionId: sessionA.id,
+        status: "pending_confirmation", subtotal: "100.00", total: "100.00",
+      }).returning();
+      const placed = await readRevisions(scopeA);
+      assert.notEqual(placed.resources.orders, beforeA.resources.orders);
+      assert.equal((await readRevisions(scopeB)).resources.orders, beforeB.resources.orders);
+      assert.notEqual((await readRevisions({ kind: "staff" })).resources.orders, beforeStaff.resources.orders);
+      await db.update(orders).set({ status: "rejected", rejectionReason: "expired" }).where(eq(orders.id, order.id));
+      assert.notEqual((await readRevisions(scopeA)).resources.orders, placed.resources.orders);
+      await db.update(tableSessions).set({ status: "closed", closedAt: new Date(), closedBy: "timeout" }).where(eq(tableSessions.id, sessionA.id));
+      assert.notEqual((await readRevisions(scopeA)).resources.tables, beforeA.resources.tables);
+    });
+
     await t.test(
       "simultaneous refreshes after a network change keep both successors usable",
       async () => {

@@ -4,6 +4,7 @@ import { pool } from "./src/db/index.ts";
 import { logger, serializeError } from "./src/lib/logger.ts";
 import { closeRedis } from "./src/lib/rateLimitStore.ts";
 import { runMaintenance } from "./src/lib/maintenance.ts";
+import { closeRealtimeStreams } from "./src/lib/realtime/stream.ts";
 // ---------- Startup ----------
 
 const server = app.listen(env.PORT, () => {
@@ -36,6 +37,7 @@ const shutdown = (reason: string, exitCode = 0) => {
   }, 10_000).unref();
 
   clearInterval(maintenanceTimer);
+  closeRealtimeStreams();
 
   server.close(async () => {
     try {

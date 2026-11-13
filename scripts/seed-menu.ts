@@ -73,9 +73,16 @@ try {
       );
       if (found) same(found, group, group.name);
       else {
+        // required groups are single-choice until multi-select is exposed in
+        // the admin API; keep the database's required/min_selections invariant.
+        const input = {
+          ...group,
+          minSelections: group.required ? 1 : 0,
+          maxSelections: 1,
+        };
         found = values["dry-run"]
-          ? { ...group, id: virtualId-- }
-          : (await tx.insert(menuOptionGroups).values(group).returning())[0];
+          ? { ...input, id: virtualId-- }
+          : (await tx.insert(menuOptionGroups).values(input).returning())[0];
         count.groups++;
       }
       groupIds.set(group.name, found.id);

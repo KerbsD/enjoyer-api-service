@@ -179,6 +179,8 @@ export const rotateSession = async (
     // a fingerprint mismatch alone only warns below. But a replay INSIDE the
     // grace window from a different fingerprint is not a multi-tab race —
     // concurrent tabs share ip + user-agent — so it is treated as theft.
+    // On first use these fields are changed to the consuming fingerprint,
+    // so a network change followed by a same-client retry stays in the grace path.
     const stored = { ip: session.ip, userAgent: session.userAgent };
     const mismatched = fingerprintDiffers(stored, current);
 
@@ -205,7 +207,7 @@ export const rotateSession = async (
     if (!session.usedAt) {
       await tx
         .update(sessions)
-        .set({ usedAt: now })
+        .set({ usedAt: now, ...current })
         .where(eq(sessions.id, session.id));
     }
 

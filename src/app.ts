@@ -30,8 +30,17 @@ import staffMenuItemsRoute from "./routes/menuItems/staff.ts";
 import { handlePublicMenu } from "./controllers/menuItems/public.ts";
 import adminTablesRoute from "./routes/tables/admin.ts";
 import staffTablesRoute from "./routes/tables/staff.ts";
-import { resolveTable } from "./controllers/tables/public.ts";
-import { validateResolveTable } from "./validators/tables.ts";
+import publicTablesRoute from "./routes/tables/public.ts";
+import publicCartRoute from "./routes/cart/public.ts";
+import adminSettingsRoute from "./routes/settings/admin.ts";
+import adminStoreHoursRoute from "./routes/storeHours/admin.ts";
+import adminHolidayOverridesRoute from "./routes/storeHours/holidays.ts";
+import { getPublicStoreStatus } from "./controllers/storeHours/public.ts";
+import publicOrdersRoute from "./routes/orders/public.ts";
+import staffOrdersRoute from "./routes/orders/staff.ts";
+import staffOrderTablesRoute from "./routes/orders/tables.ts";
+import { staffRealtime, tableRealtime } from "./routes/realtime.ts";
+import { dashboardRoute, exportRoute, historyRoute } from "./routes/reports/admin.ts";
 
 const app = express();
 if (env.TRUST_PROXY_HOPS > 0) app.set("trust proxy", env.TRUST_PROXY_HOPS);
@@ -63,6 +72,10 @@ app.get("/health/ready", async (_req, res) => {
   res.status(dbReadiness.ok ? 200 : 503).json({ ok: dbReadiness.ok });
 });
 
+// Realtime routes have their own NAT-friendly IP and authenticated quotas.
+// Both routers authenticate independently before sending any data.
+app.use("/tables/realtime", tableRealtime);
+app.use("/staff/realtime", staffRealtime);
 app.use(globalLimiter);
 
 // Staff authentication. There is no public sign-up: accounts are created by
@@ -76,7 +89,10 @@ app.use("/auth/invite", inviteRoute);
 // Public routes for customers (QR menu, ordering) are mounted here, above
 // verifyJwt. Customers never log in.
 app.get("/menu", handlePublicMenu);
-app.post("/tables/resolve", validateResolveTable, resolveTable);
+app.get("/store/status", getPublicStoreStatus);
+app.use("/tables/cart", publicCartRoute);
+app.use("/tables/orders", publicOrdersRoute);
+app.use("/tables", publicTablesRoute);
 
 app.use(verifyJwt);
 
@@ -88,6 +104,14 @@ app.use("/admin/menu-items", adminMenuItemsRoute);
 app.use("/staff/menu-items", staffMenuItemsRoute);
 app.use("/admin/tables", adminTablesRoute);
 app.use("/staff/tables", staffTablesRoute);
+app.use("/staff/orders", staffOrdersRoute);
+app.use("/staff/tables", staffOrderTablesRoute);
+app.use("/admin/settings", adminSettingsRoute);
+app.use("/admin/store-hours", adminStoreHoursRoute);
+app.use("/admin/holiday-overrides", adminHolidayOverridesRoute);
+app.use("/admin/dashboard", dashboardRoute);
+app.use("/admin/orders", historyRoute);
+app.use("/admin/exports", exportRoute);
 
 // Everything below needs a valid access token. Guard each route with
 // requirePermission("...") from src/middlewares/requirePermission.ts, e.g.

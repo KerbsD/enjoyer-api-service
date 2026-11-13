@@ -1,0 +1,67 @@
+{
+  "info": {
+    "name": "Enjoyer — Realtime (Phase 4)",
+    "description": "Use login and /tables/open first. Set accessToken, tableToken and tableSessionId locally. Streams use header credentials; polling captures revisions. No migration required.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:3000" },
+    { "key": "accessToken", "value": "" },
+    { "key": "tableToken", "value": "" },
+    { "key": "tableSessionId", "value": "" },
+    { "key": "staffRevision", "value": "" },
+    { "key": "tableRevision", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "Staff stream",
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }],
+        "url": "{{baseUrl}}/staff/realtime/events"
+      }
+    },
+    {
+      "name": "Staff polling (capture revision)",
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }],
+        "url": "{{baseUrl}}/staff/realtime/changes"
+      },
+      "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["if (pm.response.code === 200) pm.collectionVariables.set('staffRevision', pm.response.json().data.revision);"] } }]
+    },
+    {
+      "name": "Staff polling since revision (204 if unchanged)",
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }],
+        "url": "{{baseUrl}}/staff/realtime/changes?since={{staffRevision}}"
+      }
+    },
+    {
+      "name": "Table stream",
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "X-Table-Token", "value": "{{tableToken}}" }],
+        "url": "{{baseUrl}}/tables/realtime/events?sessionId={{tableSessionId}}"
+      }
+    },
+    {
+      "name": "Table polling (capture revision)",
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "X-Table-Token", "value": "{{tableToken}}" }],
+        "url": "{{baseUrl}}/tables/realtime/changes?sessionId={{tableSessionId}}"
+      },
+      "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["if (pm.response.code === 200) pm.collectionVariables.set('tableRevision', pm.response.json().data.revision);"] } }]
+    },
+    {
+      "name": "Table polling since revision (204 if unchanged)",
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "X-Table-Token", "value": "{{tableToken}}" }],
+        "url": "{{baseUrl}}/tables/realtime/changes?sessionId={{tableSessionId}}&since={{tableRevision}}"
+      }
+    }
+  ]
+}

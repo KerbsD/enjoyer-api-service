@@ -14,8 +14,7 @@
     "drizzle.config.ts",
     "src/**/*.ts",
     "src/**/*.d.ts",
-    "scripts/seed-menu.ts",
-    "scripts/verify-menu.ts",
-    "scripts/data/**/*.ts"
+    "scripts/**/*.ts",
+    "tests/**/*.ts"
   ]
 }

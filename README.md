@@ -251,17 +251,20 @@ because the source menu provides none. Category display order is Signature
 Coffee, Black, White, Non-Coffee, Refreshers, Starters, Sandwiches, Pastries.
 
 `0003_menu_options.sql` adds option groups, choices, and item/group links.
-Each group allows at most one selection. `required: true` means a selection is
-required; otherwise leaving it unselected preserves the standard recipe/base
-price. `priceDelta` is an exact decimal peso surcharge. Each choice has an
+Groups support `minSelections` and `maxSelections` for multi-select add-ons; the
+legacy `required` flag is true exactly when `minSelections` is at least 1.
+Each seeded group currently allows at most one selection, so the public flag
+stays `maxSelections: 1`. A group with `required: true` requires a selection;
+otherwise leaving it unselected preserves the standard recipe/base price.
+`priceDelta` is an exact decimal peso surcharge. Each choice has an
 availability flag, allowing it to stay visible but unavailable. Shared group
 edits affect every attached item.
 
 `GET /menu` now includes `optionGroups` on every item. Each group contains
-`id`, `name`, `required`, `maxSelections: 1`, `sortOrder` and `options` (choice
-IDs, names, price deltas, availability and order). Options are batch-loaded for
-the visible menu. Choice validation and server-calculated order totals will be
-enforced when cart/order submission is implemented; there is no ordering API yet.
+`id`, `name`, `required`, `minSelections`, `maxSelections`, `sortOrder` and
+`options` (choice IDs, names, price deltas, availability and order). Options are
+batch-loaded for the visible menu. Cart submission validates these selections
+and calculates totals server-side; there is no order-placement API yet.
 
 All management endpoints below require `menu:manage` (Manager or Owner):
 
@@ -269,7 +272,7 @@ All management endpoints below require `menu:manage` (Manager or Owner):
 | --- | --- | --- |
 | GET | `/admin/option-groups` | List groups with choices |
 | POST | `/admin/option-groups` | Create a group and 1–50 choices atomically |
-| PATCH | `/admin/option-groups/:id` | Edit name, required flag or order |
+| PATCH | `/admin/option-groups/:id` | Edit name, order/required flag, minimum and maximum selections |
 | POST | `/admin/option-groups/:id/options` | Add a choice |
 | PATCH | `/admin/option-groups/:id/options/:optionId` | Edit name, priceDelta, availability or order |
 | GET | `/admin/menu-items/:id/option-groups` | Inspect an item's choices |
@@ -297,6 +300,435 @@ zero inserts. `verify:menu` executes the actual public-menu handler against
 PostgreSQL and checks every seeded name, description, price, spicy flag and
 option assignment against the source manifest. It is an initial-seed check;
 intentional later menu edits can cause it to report differences.
+
+## Tables and QR codes
+
+Migration `0004_shop_tables.sql` is applied to the configured database. Run
+`npm run db:migrate` when setting up another database. Physical tables have a
+name, a stable random QR token, an order limit (default 5), and an active flag.
+No physical tables are seeded automatically; create the shop's actual tables
+through the API.
+
+| Method | Path | Permission / purpose |
+| --- | --- | --- |
+| POST | `/admin/tables` | Manager/Owner: create a table (201) |
+| GET | `/admin/tables?active=true&limit=50&offset=0` | Manager/Owner: list tables, including QR details |
+| GET | `/admin/tables/:id` | Manager/Owner: get one table |
+| PATCH | `/admin/tables/:id` | Manager/Owner: rename, change orderLimit, deactivate/reactivate |
+| GET | `/admin/tables/:id/qr?format=png` | Manager/Owner: download PNG (default) or SVG |
+| GET | `/admin/tables/qr-sheet` | Manager/Owner: download printable HTML containing active table codes |
+| GET | `/staff/tables` | Staff/Manager/Owner: list table metadata; QR tokens/URLs omitted |
+| POST | `/tables/resolve` | Public: resolve `{ "token": "QR_TOKEN" }` to an active table |
+
+Create with `{ "name": "Table 1" }`, optionally including `orderLimit` and
+`active`. Names are trimmed and limited to 1–100 characters. The order limit
+must be a JSON integer from 1 through 2147483647. PATCH accepts any nonempty
+subset of these three fields. Unknown fields, including a caller-supplied ID
+or QR token, are rejected. Use `{ "active": false }` to deactivate, or `true`
+to reactivate. Renaming and activation changes preserve the original QR token.
+There is no hard-delete or QR-rotation endpoint.
+
+Both list routes accept optional `active=true|false` and limit/offset pagination
+(default limit 50, maximum 100), ordered by ID. Staff reads currently show
+physical-table metadata only; free/open state, order counts and unpaid totals
+will come with table sessions and orders.
+
+Public resolution needs no staff login. It returns only `id`, `name` and
+`orderLimit`. An unknown, malformed nonempty or deactivated token returns 404
+with `code: "INVALID_TABLE_QR"`; missing/invalid body fields return 400. Resolving
+does not start a session, open a cart or place an order. `POST /tables/open`
+starts the table's provisional session and cart, as described in the next
+section. The stored limit will be enforced by the future order submission flow.
+
+QR links use `CUSTOMER_URL/order#table=TOKEN`. `CUSTOMER_URL` is optional and
+falls back to `CLIENT_URL`; both must be plain origins, with HTTPS in production.
+Choose the intended customer origin before printing codes. The fragment keeps
+the token out of frontend server request URLs. The customer `/order` page is
+deferred: during this API phase, test the token with `/tables/resolve` in Postman.
+
+The single-code download rejects inactive tables with 409. The sheet includes
+only active tables and escapes their names. Save the downloaded HTML, open it
+in a browser and use Print. PNG/SVG downloads and the printable sheet are
+attachments; in Postman, use **Send and Download**.
+
+Import `postman/Enjoyer-tables.postman_collection.json`, set local `email`,
+`password` and an allowed `origin`, then run **Login as Manager or Owner** and
+**Create table**. The collection captures `tableId`, `tableToken` and `tableUrl`
+for the remaining requests. Run requests individually: the collection includes
+deactivation and reactivation checks. Tokens and credentials should stay local.
+
+## Store settings, hours, table sessions and the shared cart
+
+Migration `0005_sessions_carts_settings.sql` adds `settings`, `store_hours`,
+`holiday_overrides`, `table_sessions`, `carts`, `cart_items` and
+`cart_item_options`. It is applied to the configured database. Run
+`npm run db:migrate` when setting up another database.
+
+### Settings
+
+| Method | Path | Permission / purpose |
+| --- | --- | --- |
+| GET | `/admin/settings` | Manager/Owner: read idle timeout, confirmation expiry, timezone |
+| PATCH | `/admin/settings` | Manager/Owner: update one or both timings |
+
+```json
+{ "idleTimeoutMinutes": 180, "confirmationExpiryMinutes": 10 }
+```
+
+`idleTimeoutMinutes` accepts 1–1440; `confirmationExpiryMinutes` accepts 1–120.
+Both are integers. The shop timezone is fixed at `Asia/Manila` and exposed
+read-only. Empty bodies and unknown fields return 400.
+
+### Weekly hours and holiday overrides
+
+| Method | Path | Permission / purpose |
+| --- | --- | --- |
+| GET | `/admin/store-hours` | Manager/Owner: all seven weekdays (Sun=0 … Sat=6) |
+| PUT | `/admin/store-hours/:dayOfWeek` | Manager/Owner: replace one weekday |
+| GET | `/admin/holiday-overrides?from=YYYY-MM-DD&to=YYYY-MM-DD` | Manager/Owner: paginated date overrides |
+| PUT | `/admin/holiday-overrides/:date` | Manager/Owner: create or replace one date |
+| DELETE | `/admin/holiday-overrides/:date` | Manager/Owner: remove one date override |
+
+Open days use `{ "closed": false, "openTime": "08:00", "closeTime": "17:00" }`;
+closed days use `{ "closed": true }`. Times are shop-local 24-hour values,
+close must be later than open, and overnight hours are rejected. Holiday
+overrides take precedence over the weekday schedule.
+
+If no weekday has ever been configured, ordering is unrestricted (`configured:
+false`, open at any time). Once any weekday row exists, weekdays without a row
+are treated as closed.
+
+`GET /store/status` is public and returns `isOpen`, `configured`, `timezone`,
+`localDate`, `localTime`, today’s effective hours, `closesAt`, `nextOpen` and a
+seven-day `week` beginning today. `closesAt`/`nextOpen` are ISO-8601 UTC
+instants; the frontend formats them in shop-local time. Store hours are not yet
+enforced when editing or reading a cart: order placement will reject a closed
+store.
+
+### Opening a table and the shared cart
+
+| Method | Path | Authentication / purpose |
+| --- | --- | --- |
+| POST | `/tables/open` | Public: `{ "token": "QR_TOKEN" }`; create or reuse the session and cart |
+| GET | `/tables/cart` | `X-Table-Token`: current cart with current prices |
+| POST | `/tables/cart/items` | Add a line; requires `version` |
+| PATCH | `/tables/cart/items/:id` | Edit quantity, note or options; requires `version` |
+| DELETE | `/tables/cart/items/:id?version=N` | Remove one line |
+| DELETE | `/tables/cart?version=N` | Clear the cart |
+
+`POST /tables/open` returns the table, the provisional session
+(`status: "pending"`) and its empty or existing cart. Scanning again reuses the
+current non-closed session. A session idle longer than `idleTimeoutMinutes` is
+closed first, so the next customers get a fresh cart. The maintenance loop
+job also closes idle sessions; cart mutations enforce the timeout inline as a
+race guard. The session becomes `open` only when staff confirm the first order
+in a later phase.
+
+Cart requests send the printed QR token in `X-Table-Token`, never in the URL.
+CORS allows that header for the customer frontend. A malformed, unknown or
+inactive token returns 404 `INVALID_TABLE_QR`; inactive tables are rejected
+before any session work. A valid table with no live session returns 409
+`TABLE_SESSION_REQUIRED`; the customer must scan/open again.
+
+Every mutation includes the cart `version` it last saw. A stale version returns
+409 `CART_VERSION_CONFLICT` with the latest cart in `data`, so the client can
+re-render and retry. Mutations lock the session then the cart, bump the version
+and update the session’s `lastActivityAt`.
+
+Example add body:
+
+```json
+{
+  "menuItemId": 3,
+  "quantity": 2,
+  "optionIds": [5],
+  "note": "no sugar",
+  "version": 0
+}
+```
+
+Adds merge identical item + note + option-set lines and cap each line at 99.
+Option groups are validated server-side against the item’s assigned groups:
+missing selections, too many selections, foreign options and unavailable
+options are rejected. Menu-item and option prices are read at request time; the
+cart stores no price snapshot. Responses include `unitPrice`, `lineTotal`,
+`itemCount`, `subtotal` and `total`, all computed in integer centavos and
+returned as exact two-decimal PHP strings. Hiding an item makes it
+unorderable; sold-out items return 409 `MENU_ITEM_UNAVAILABLE`. Cart lines can
+still be removed when an item becomes unavailable.
+
+Import
+`postman/Enjoyer-sessions-cart.postman_collection.json` to test settings,
+hours, table opening and cart versioning. Set local `email`, `password`,
+`origin`, `tableToken`, `menuItemId` and (optionally) `optionId`, then run the
+login and open requests first; the collection captures `accessToken`,
+`cartVersion` and `cartItemId`.
+
+## Orders: placement, confirmation and lifecycle
+
+Migration `0006_smiling_agent_brand.sql` adds the order, order-line, option
+snapshot and daily order-number counter tables. Apply it with
+`npm run db:migrate` before deploying this version.
+
+### Customer orders
+
+All customer endpoints use the printed QR credential in `X-Table-Token` and
+are scoped to the table's current session:
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| POST | `/tables/orders` | Submit the shared cart; body is `{ "version": 3 }` |
+| GET | `/tables/orders` | List this session's orders, total and remaining limit |
+| POST | `/tables/orders/:id/cancel` | Cancel an order while Pending confirmation or Received |
+
+Placement checks store hours, cart version and emptiness, table order limit,
+item/option availability and option-group selection rules in one transaction.
+It snapshots item and option names/prices, clears the cart and increments the
+cart version atomically. A provisional session's first order is
+`pending_confirmation`; after Staff confirms it, the session opens and later
+orders start as `received`. A pending first order counts toward the limit, and
+the customer must wait for confirmation before placing another. Rejected or
+expired orders do not count, and a subsequent order in that still-pending
+session requires confirmation again.
+
+Order numbers are `YYYYMMDD-NNN`, using the shop-local calendar day
+(`Asia/Manila`) and an atomically allocated daily counter. API timestamps are
+ISO-8601 UTC. Amounts are exact two-decimal PHP strings.
+
+### Staff order board and tables
+
+| Method | Path | Permission / purpose |
+| --- | --- | --- |
+| GET | `/staff/orders` | Staff: oldest-first board; optional `status`, `tableId`, `paymentStatus`, `includeCancelled`, `limit`, `offset` |
+| GET | `/staff/orders/:id` | Staff: full order detail |
+| POST | `/staff/orders/:id/confirm` | Staff: confirm first order and open its session |
+| POST | `/staff/orders/:id/reject` | Staff: reject pending first order; optional `{ "reason": "..." }` |
+| POST | `/staff/orders/:id/advance` | Staff: Received → Preparing → Ready → Served |
+| POST | `/staff/orders/:id/revert` | Manager/Owner: move one step back |
+| POST | `/staff/orders/:id/cancel` | Staff: cancel at any status with required `{ "reason": "..." }` |
+| POST | `/staff/orders/:id/paid` | Staff: mark a Served order paid with `{ "method": "cash" }` or `other` |
+| GET | `/staff/tables/overview` | Staff: free/pending/open table status, order count and unpaid amount |
+| GET | `/staff/tables/:tableId/orders` | Staff: current session's full orders |
+| POST | `/staff/tables/:tableId/close` | Staff: close; Manager/Owner must send `{ "overrideUnpaid": true }` to override unpaid warning |
+
+Cancelled orders retain their payment status (`Cancelled — Paid` where
+applicable), but are excluded from order-limit and unpaid totals. Rejected and
+cancelled orders are hidden from the default board list. Staff cancellation
+reasons are required and limited to 500 characters. Marking paid is a separate
+action available only after Served, with `cash` or `other` recorded; there are
+no refunds or online payment flows.
+
+Unconfirmed first orders expire to `rejected` with
+`rejectionReason: "expired"` after the configured confirmation expiry. The
+maintenance loop runs every minute. Idle-session closure still proceeds with
+unpaid orders, which remain visible in historical order data.
+
+See Phase 4 below for SSE delivery and polling fallback for these resources.
+
+## Phase 4: live updates (SSE and polling fallback)
+
+No new migration or environment variables are required. The API detects
+committed database changes every **two seconds while watched**, sharing one
+check per audience/session per API process. This works with pooled Neon
+connections and multiple API instances; it also catches maintenance jobs,
+expiry, idle closures, and menu edits without controller-specific publishing.
+Nothing is emitted for a rolled-back write. Checks do not extend table idle
+timeouts. Each check returns bounded fingerprints; computing staff order
+fingerprints scans order history, so review query cost as that history grows.
+
+| Method | Path | Authentication |
+| --- | --- | --- |
+| GET | `/staff/realtime/events` | Bearer access token, Staff/Manager/Owner |
+| GET | `/staff/realtime/changes?since=REVISION` | Same; polling fallback |
+| GET | `/tables/realtime/events?sessionId=UUID` | `X-Table-Token`, original session ID from `/tables/open` |
+| GET | `/tables/realtime/changes?sessionId=UUID&since=REVISION` | Same; polling fallback |
+
+`since` is optional on polling requests. A matching revision returns **204**;
+otherwise **200** returns `{ success: true, data: { revision, resources,
+scope, pollIntervalMs: 5000 } }`. Revisions are opaque content fingerprints,
+not ordered sequence numbers. Never put JWTs or QR tokens in query strings.
+The existing CORS allowlist permits both authentication headers.
+
+### SSE protocol
+
+Streams return `text/event-stream`, `Cache-Control: no-store, no-transform`
+and `X-Accel-Buffering: no`. Proxy buffering/compression must be disabled for
+these routes; allow idle connections longer than the 15-second heartbeat.
+
+* `sync`: always the first data event after authorization. Refetch all resources
+  for this audience, including after reconnect. No durable event replay or
+  `Last-Event-ID` cursor is used.
+* `change`: contains the latest revision, resource fingerprints, and a `changed`
+  array. Multiple writes may coalesce into one invalidation.
+* `access-ended`: credentials expired, account/table deactivated, or the
+  original session closed/expired. Contains `status`, `code`, and `message`,
+  then the connection ends.
+* `unavailable`: database/read failure; switch to polling with backoff.
+* `reconnect`: shutdown or periodic connection rotation; reconnect/resync.
+* `: heartbeat`: comment every 15 seconds; ignore it as application data.
+
+Example data frame:
+
+```text
+event: change
+data: {"revision":"<opaque hash>","resources":{"orders":"...","tables":"...","menu":"...","store":"...","cart":"..."},"changed":["cart"],"scope":{"kind":"table","tableId":1,"sessionId":"..."},"pollIntervalMs":5000}
+
+```
+
+Resource invalidations tell the frontend which existing GETs to refetch:
+
+| Changed resource | Customer refresh | Staff refresh |
+| --- | --- | --- |
+| `cart` | `/tables/cart` | Not sent to staff |
+| `orders` | `/tables/orders` | `/staff/orders` and `/staff/tables/overview`; open order/table details |
+| `tables` | `/tables/orders` and table context | Table overview, board table labels, open table details |
+| `menu` | `/menu` **and** `/tables/cart` (live prices/availability) | Menu/sold-out controls |
+| `store` | `/store/status` | Settings/hours if displayed |
+
+Store invalidation includes minute boundaries, so open/closed hours refresh
+without a database edit. Customer fingerprints are scoped to the original
+session; they include no other table's cart or orders. Staff access and JWT
+expiry, customer QR validity and session lifetime are rechecked before each
+data delivery. Closed sessions cannot roll over to a later visit on reconnect.
+Slow readers are disconnected rather than accumulating response buffers.
+Streams close cleanly on shutdown and rotate after 30 minutes. Per-process
+limits are 500 total streams and 20 per account/table. Realtime routes use
+separate NAT-friendly rate limits for five-second fallback polling.
+
+### Browser integration
+
+`src/client/realtime.ts` exports the dependency-free, browser-compatible
+`watchRealtime` helper. Import/copy it into the frontend. It uses streaming
+`fetch` to support headers, handles UTF-8 SSE framing, detects stalled streams,
+falls back to five-second polling with error backoff, and retries SSE every
+30 seconds while polling. `stop()`/`AbortSignal` cancels requests and timers.
+Only advance the client revision after the resource refresh succeeds.
+
+```ts
+const watcher = watchRealtime({
+  url: `${apiUrl}/tables/realtime?sessionId=${session.id}`,
+  headers: () => ({ "X-Table-Token": tableToken }),
+  async onChange(state, changed) {
+    // Await the fetch AND application of the results to your UI state.
+    if (changed.includes("cart") || changed.includes("menu")) await refreshCart();
+    if (changed.includes("orders") || changed.includes("tables")) await refreshOrders();
+    if (changed.includes("menu")) await refreshMenu();
+    if (changed.includes("store")) await refreshStoreStatus();
+  },
+  onAccessEnded(failure) {
+    // TABLE_SESSION_REQUIRED / INVALID_TABLE_QR: show the scan/ask-staff flow.
+    showSessionEnded(failure.message);
+  },
+});
+// On page teardown:
+watcher.stop();
+```
+
+Staff use `${apiUrl}/staff/realtime` and an `Authorization: Bearer ...` header.
+On `AUTH_REQUIRED` (401), use the existing refresh/login flow and start a new
+watcher with the new token. The helper stops on 401/403/404/409 rather than
+retrying invalid credentials indefinitely. It does not refresh login cookies
+itself. Native `EventSource` is unsuitable because it cannot set these headers.
+
+For board sound/visual alerts, compare newly fetched order IDs against the
+previous board state. Treat initial load/reconnect as a baseline, not a burst
+of new-order alerts. Actual sound playback and UI rendering belong to the
+frontend; these events invalidate API data rather than carrying UI commands.
+
+Import `postman/Enjoyer-realtime.postman_collection.json` for stream/poll
+requests. The polling requests save revision values for subsequent 204 checks.
+Unit/HTTP tests cover streaming, isolation, access expiry, cleanup, parsing and
+fallback. The opt-in PostgreSQL suite also checks commit/rollback visibility
+and cross-session isolation against the real revision SQL.
+
+## Phase 5: dashboard, order history and export
+
+These manager features use shop-local calendar dates (`Asia/Manila`) and query
+UTC instants with inclusive start/exclusive next-day boundaries. No migration
+or new package is required. The requested export formats are XLSX **or** CSV;
+CSV is implemented to keep the service dependency-free.
+
+| Method | Path | Permission / purpose |
+| --- | --- | --- |
+| GET | `/admin/dashboard?period=today` | Manager/Owner: totals, paid revenue, best sellers, peak hours and status breakdown |
+| GET | `/admin/dashboard?period=7days` | Rolling seven shop-local dates ending today |
+| GET | `/admin/dashboard?period=30days` | Rolling 30 shop-local dates ending today |
+| GET | `/admin/dashboard?from=YYYY-MM-DD&to=YYYY-MM-DD` | Dashboard for an inclusive custom date range |
+| GET | `/admin/orders` | Paginated order history and filters |
+| GET | `/admin/orders/:id` | Full order detail, including snapshotted item/options/notes |
+| GET | `/admin/exports/orders.csv?from=YYYY-MM-DD&to=YYYY-MM-DD` | CSV export of every order in the inclusive date range |
+
+Dashboard defaults to `today`; supply either a named period or both `from` and
+`to`, not both kinds. Dashboard data includes `totalOrders`, `revenue`,
+`paidOrders`, `unpaidOrders`, status counts, the ten highest-quantity sellers,
+and all 24 shop-local peak-hour buckets. Revenue sums Paid orders, including
+Paid cancelled orders. Unpaid counts exclude cancelled and rejected orders.
+Best sellers and peak hours exclude cancelled/rejected orders; total-order
+count and status breakdown include them so cancellations/rejections remain
+visible in operational totals. Item revenue uses order-line snapshots and
+includes option/add-on amounts.
+
+Order history accepts optional paired `from`/`to`, `tableId`, `status`,
+`paymentStatus`, `itemId`, `q`, `limit` (1–100, default 50), and `offset`.
+`q` searches order number, table name and snapshotted item name. With no status
+filter, all statuses—including cancelled and rejected—are included. Details
+use stored snapshots, so later menu/table edits do not rewrite past order data.
+
+The CSV export requires both valid calendar dates and includes **all** orders,
+including rejected and cancelled rows. Columns include order ID/number, UTC
+created time, table, item/add-on/note summary, PHP total, payment status/method,
+and a cancelled flag. Rows are streamed in batches; formula-leading text is
+neutralized and CSV cells are quoted. The output uses UTF-8 with BOM for common
+spreadsheet compatibility.
+
+The spec mentions an activity log only as an additional feature without a
+detailed story or rules. It is intentionally not included in this phase; its
+events, retention, visibility and filtering need product decisions first.
+Import `postman/Enjoyer-reports.postman_collection.json` to exercise the
+dashboard presets/custom range, history filters/detail and CSV download.
+
+## Audit fixes and verification
+
+The two confirmed findings in `AUDIT-2026-11-11.md` have been fixed:
+
+- With no Redis, login-backoff entries are swept every minute after their
+  15-minute sliding expiry. The store is capped at 10,000 addresses; at capacity
+  it evicts the least recently failed address. Per-IP limiters still apply.
+- The first refresh records the consuming IP/user-agent on the used token.
+  Another request from that same client can use the 10-second grace window
+  after a network change. A different client or an out-of-window replay still
+  revokes the family. This reuses existing session columns; no auth migration
+  is required. Unused tokens retain their issuing fingerprint for mismatch logs.
+
+`npm test` now covers the actual backoff middleware, fake-clock expiry/capacity,
+refresh grace/replay regressions, table permissions and QR formats, settings
+bounds, weekly/holiday resolution, table opening, cart version conflicts,
+option selection and centavo-exact totals. `npm run typecheck` also includes all
+test files and seed scripts.
+
+For real PostgreSQL concurrency checks, set `ENJOYER_TEST_DATABASE_URL` to a
+**direct** connection with permission to create schemas, then run
+`npm run test:integration`. Prefer a dedicated test database/branch. The runner
+never falls back to `DATABASE_URL`; without the explicit test URL it reports a
+skipped suite. For Neon, use the direct host without `-pooler` because the tests
+require a session-level `search_path`.
+
+Each run creates a random `enjoyer_test_<hex>` schema, applies the real migration
+files there, and removes only that schema when finished. The application's
+`public` schema is never written. Normal test failures also trigger cleanup;
+force-killing the process may leave its temporary schema for manual cleanup.
+Email and the external breach check are mocked; database queries and transaction
+locks are real. Tests cover refresh races after a network change, concurrent
+Owner deactivation, one-time password reset consumption, refresh versus logout,
+complete option-assignment replacement and the table lifecycle/constraints.
+
+Verification on 2026-11-13: type check passed and 98 unit/HTTP tests passed.
+The Phase 4 revision SQL and Phase 5 dashboard/history SQL were verified
+read-only against the configured PostgreSQL database. The isolated integration
+suite remains skipped without `ENJOYER_TEST_DATABASE_URL`.
+The Phase 2 HTTP suite covers settings, store hours, holidays, public store
+status, table opening and the shared cart. The PostgreSQL integration suite was
+last verified on 2026-11-11 (7 test results including the parent).
 
 ## Checks
 

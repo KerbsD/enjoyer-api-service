@@ -36,6 +36,20 @@
       "when": 1794377353545,
       "tag": "0004_shop_tables",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1794461523913,
+      "tag": "0005_sessions_carts_settings",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1794467167349,
+      "tag": "0006_smiling_agent_brand",
+      "breakpoints": true
     }
   ]
 }

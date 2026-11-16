@@ -54,6 +54,8 @@ const { signAccessToken } = await import("../src/lib/tokens.ts");
 const { default: errorHandler } =
   await import("../src/middlewares/errorHandler.ts");
 const { resolveStoreStatus } = await import("../src/lib/storeHours.ts");
+const { listStaffOrders } = await import("../src/controllers/orders/staff.ts");
+const { listStaffOrdersQuerySchema } = await import("../src/validators/orders.ts");
 const { validateOptionSelection, summarizeCart } =
   await import("../src/lib/cart.ts");
 const { toCents, fromCents } = await import("../src/lib/money.ts");
@@ -362,6 +364,48 @@ test("order lifecycle allows only one-step moves and excludes cancelled/rejected
   assert.equal(isCountedOrder("pending_confirmation"), true);
   assert.equal(isCountedOrder("cancelled"), false);
   assert.equal(isCountedOrder("rejected"), false);
+});
+
+test("active-session order filter excludes closed visits without changing default lists", async () => {
+  assert.equal(
+    listStaffOrdersQuerySchema.safeParse({
+      status: "served",
+      activeSessionOnly: "true",
+      limit: "100",
+      offset: "0",
+    }).success,
+    true,
+  );
+  const query = {
+    status: "served",
+    activeSessionOnly: true,
+    limit: 100,
+    offset: 0,
+  };
+  let result: unknown;
+  const res = {
+    locals: { query },
+    json(value: unknown) {
+      result = value;
+      return this;
+    },
+  };
+  queries = [];
+  replies = [[], [[0]]];
+  await listStaffOrders({} as never, res as never);
+  assert.equal((result as { pagination: { total: number } }).pagination.total, 0);
+  assert.equal(queries.length, 2);
+  for (const statement of queries) {
+    assert.match(statement.text, /table_sessions/);
+    assert.ok(statement.params.includes("closed"));
+  }
+
+  queries = [];
+  replies = [[], [[0]]];
+  res.locals.query.activeSessionOnly = false;
+  await listStaffOrders({} as never, res as never);
+  for (const statement of queries)
+    assert.doesNotMatch(statement.text, /table_sessions/);
 });
 
 // ---------- Store status (pure) ----------

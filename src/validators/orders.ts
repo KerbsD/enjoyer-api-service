@@ -20,6 +20,9 @@ export const listStaffOrdersQuerySchema = z.strictObject({
   // The live board hides cancelled/rejected orders by default. Managers can
   // still find them through order history in a later phase.
   includeCancelled: booleanQueryField("includeCancelled").optional(),
+  // Restrict live service to orders from non-closed table visits. Omitted
+  // means the existing all-session API behavior is preserved.
+  activeSessionOnly: booleanQueryField("activeSessionOnly").optional(),
   ...paginationFields(100),
 });
 

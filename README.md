@@ -499,7 +499,7 @@ ISO-8601 UTC. Amounts are exact two-decimal PHP strings.
 
 | Method | Path | Permission / purpose |
 | --- | --- | --- |
-| GET | `/staff/orders` | Staff: oldest-first board; optional `status`, `tableId`, `paymentStatus`, `includeCancelled`, `limit`, `offset` |
+| GET | `/staff/orders` | Staff: oldest-first orders; optional `status`, `tableId`, `paymentStatus`, `includeCancelled`, `activeSessionOnly` (exclude closed table visits), `limit`, `offset` |
 | GET | `/staff/orders/:id` | Staff: full order detail |
 | POST | `/staff/orders/:id/confirm` | Staff: confirm first order and open its session |
 | POST | `/staff/orders/:id/reject` | Staff: reject pending first order; optional `{ "reason": "..." }` |

@@ -1,4 +1,4 @@
-import { and, eq, notInArray, sql } from "drizzle-orm";
+import { and, eq, inArray, ne, notInArray, sql } from "drizzle-orm";
 import type { Request, Response } from "express";
 import { db } from "../../db/index.ts";
 import { carts, orders, shopTables, tableSessions } from "../../db/schema.ts";
@@ -81,6 +81,7 @@ export const listStaffOrders = async (req: Request, res: Response) => {
     tableId,
     paymentStatus,
     includeCancelled,
+    activeSessionOnly,
     limit,
     offset,
   } = res.locals.query as ListStaffOrdersQuery;
@@ -95,6 +96,15 @@ export const listStaffOrders = async (req: Request, res: Response) => {
     paymentStatus === undefined
       ? undefined
       : eq(orders.paymentStatus, paymentStatus),
+    activeSessionOnly
+      ? inArray(
+          orders.tableSessionId,
+          db
+            .select({ id: tableSessions.id })
+            .from(tableSessions)
+            .where(ne(tableSessions.status, "closed")),
+        )
+      : undefined,
   );
 
   const rows = await findOrders(where, limit, offset);

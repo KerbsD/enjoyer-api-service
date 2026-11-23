@@ -12,6 +12,7 @@ const corsOptions: CorsOptions = {
   credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization", "X-Table-Token"],
+  exposedHeaders: ["Retry-After"],
   maxAge: 600, // let browsers cache preflight results for 10 minutes
   optionsSuccessStatus: 200,
 };

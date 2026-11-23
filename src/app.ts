@@ -7,7 +7,7 @@ import { env } from "./configs/env.ts";
 import corsOptions from "./configs/corsOption.ts";
 import { pool } from "./db/index.ts";
 
-import { globalLimiter } from "./lib/authLimiter.ts";
+import { apiTrafficLimiter } from "./lib/authLimiter.ts";
 
 import { requestLogger } from "./middlewares/requestLogger.ts";
 import errorHandler from "./middlewares/errorHandler.ts";
@@ -76,7 +76,7 @@ app.get("/health/ready", async (_req, res) => {
 // Both routers authenticate independently before sending any data.
 app.use("/tables/realtime", tableRealtime);
 app.use("/staff/realtime", staffRealtime);
-app.use(globalLimiter);
+app.use(apiTrafficLimiter);
 
 // Staff authentication. There is no public sign-up: accounts are created by
 // the Owner, and /auth/password/reset also completes an invite.

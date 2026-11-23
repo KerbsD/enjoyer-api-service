@@ -66,6 +66,22 @@ export const globalLimiter = createLimiter(
   "Too many requests. Please slow down.",
 );
 
+// Scope this budget by method and route, not by a client-supplied sync header.
+// All of these operations are read-only, including the QR lookup POST.
+const customerReadLimiter = createLimiter(
+  "customer-read",
+  12_000,
+  "Too many customer refreshes. Please slow down.",
+);
+
+export const apiTrafficLimiter = (req: Request, res: Response, next: NextFunction) => {
+  const path = req.path.toLowerCase().replace(/\/$/, "");
+  const customerRead = ((req.method === "GET" || req.method === "HEAD") &&
+    ["/menu", "/store/status", "/tables/cart", "/tables/orders"].includes(path)) ||
+    (req.method === "POST" && path === "/tables/resolve");
+  return (customerRead ? customerReadLimiter : globalLimiter)(req, res, next);
+};
+
 // ---------- Login ----------
 
 // Per IP + username. Only failed attempts count (responses with status >= 400)

@@ -112,6 +112,7 @@ mock.module("../src/lib/authLimiter.ts", {
   namedExports: Object.fromEntries(
     [
       "globalLimiter",
+      "apiTrafficLimiter",
       "loginIpLimiter",
       "loginLimiter",
       "loginUserBackoff",

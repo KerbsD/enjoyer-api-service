@@ -1,6 +1,7 @@
 import { after, before, mock, test } from "node:test";
 import assert from "node:assert/strict";
 import express from "express";
+import cors from "cors";
 import type { Response } from "express";
 import { EventEmitter } from "node:events";
 import { drizzle } from "drizzle-orm/node-postgres";
@@ -24,11 +25,14 @@ const client = {
 mock.module("../src/db/index.ts", { namedExports: { db: drizzle(client as never) } });
 mock.module("../src/configs/env.ts", { namedExports: { env: {
   NODE_ENV: "test", ACCESS_TOKEN_SECRET: "test-only-realtime-secret-at-least-32-characters",
+  CORS_ORIGINS: ["http://localhost:3000"],
 } } });
 mock.module("../src/lib/logger.ts", { namedExports: {
   securityLog() {}, serializeError: () => ({}), logger: { error() {}, info() {} },
 } });
-mock.module("../src/lib/rateLimitStore.ts", { namedExports: { createStore: () => undefined } });
+mock.module("../src/lib/rateLimitStore.ts", {
+  namedExports: { createStore: () => undefined, redis: null, withRedisBreaker: (run: () => unknown) => run() },
+});
 
 const { tableRealtime, staffRealtime } = await import("../src/routes/realtime.ts");
 const { signAccessToken } = await import("../src/lib/tokens.ts");
@@ -36,6 +40,8 @@ const { tableAccess, staffAccess } = await import("../src/lib/realtime/access.ts
 const { readRevisions } = await import("../src/lib/realtime/revisions.ts");
 const { openRealtimeStream, closeRealtimeStreams } = await import("../src/lib/realtime/stream.ts");
 const { default: errorHandler } = await import("../src/middlewares/errorHandler.ts");
+const { apiTrafficLimiter } = await import("../src/lib/authLimiter.ts");
+const { default: corsOptions } = await import("../src/configs/corsOption.ts");
 
 const sessionId = "11111111-1111-4111-8111-111111111111";
 const otherSession = "33333333-3333-4333-8333-333333333333";
@@ -59,6 +65,9 @@ const streamSource = new RealtimeHub(async () => {
 }, 10);
 
 const app = express();
+app.use("/budget", cors(corsOptions), apiTrafficLimiter, (_req, res) => {
+  res.set("Retry-After", "15").sendStatus(204);
+});
 app.use("/tables/realtime", tableRealtime);
 app.use("/staff/realtime", staffRealtime);
 app.get("/test/events", (_req, res) => openRealtimeStream(res, {
@@ -90,6 +99,32 @@ after(async () => {
 });
 
 function setup(...rows: (unknown[] | Error)[]) { replies = rows; queries = []; }
+
+test("customer refreshes use a separate budget and expose Retry-After across origins", async () => {
+  const origin = "http://localhost:3000";
+  const check = async (path: string, method = "GET") => {
+    const result = await fetch(`${base}/budget${path}`, { method, headers: { Origin: origin } });
+    assert.equal(result.status, 204);
+    assert.equal(result.headers.get("access-control-allow-origin"), origin);
+    assert.equal(result.headers.get("access-control-expose-headers"), "Retry-After");
+    return {
+      limit: Number(result.headers.get("ratelimit-limit")),
+      remaining: Number(result.headers.get("ratelimit-remaining")),
+    };
+  };
+
+  const checkout = await check("/tables/orders", "POST");
+  assert.equal(checkout.limit, 600);
+  for (const [path, method] of [
+    ["/menu", "GET"], ["/store/status", "GET"], ["/tables/cart", "GET"],
+    ["/tables/orders?sessionId=test", "GET"], ["/tables/resolve", "POST"],
+  ]) assert.equal((await check(path, method)).limit, 12_000);
+  const staff = await check("/staff/orders");
+  assert.equal(staff.remaining, checkout.remaining - 1);
+  assert.equal((await check("/tables/cart", "DELETE")).limit, 600);
+  assert.equal((await check("/tables/orders/example/cancel", "POST")).limit, 600);
+});
+
 async function request(path: string, staff = false) {
   const response = await fetch(base + path, { headers: staff
     ? { authorization: `Bearer ${signAccessToken(1, "staff")}` }

@@ -13,12 +13,14 @@ import { CURRENCY } from "../../configs/currency.ts";
 import { fromCents, toCents } from "../../lib/money.ts";
 import {
   loadCartLines,
-  loadCartView,
+  cartReviewFingerprint,
+  findCartView,
   loadItemOptionGroups,
   lockCart,
   validateOptionSelection,
 } from "../../lib/cart.ts";
 import type { SelectionResult } from "../../lib/cart.ts";
+import type { DbTransaction } from "../../lib/cart.ts";
 import { parseUuid } from "../../lib/helpers.ts";
 import {
   allocateOrderNumber,
@@ -49,7 +51,7 @@ type Failure =
 
 type PlacementResult =
   | Failure
-  | { kind: "ok"; orderId: string; ordersUsed: number };
+  | { kind: "ok"; orderId: string; ordersUsed: number; replayed?: boolean };
 
 const sessionRequired = (res: Response) =>
   res.status(409).json({
@@ -88,6 +90,14 @@ const selectionFailure = (
   },
 });
 
+const countSessionOrders = async (tx: DbTransaction, sessionId: string) => {
+  const [row] = await tx
+    .select({ count: sql<number>`count(*)::int` })
+    .from(orders)
+    .where(and(eq(orders.tableSessionId, sessionId), inArray(orders.status, ORDER_COUNT_STATUSES)));
+  return row?.count ?? 0;
+};
+
 // Places the shared cart as an order. Everything that must be atomic (limit,
 // number allocation, snapshots, cart clear) happens in one transaction; the
 // HTTP response is rendered only after commit.
@@ -98,30 +108,55 @@ export const placeOrder = async (req: Request, res: Response) => {
   const settings = await readShopSettings();
   const now = new Date();
   const cutoff = idleCutoff(settings, now);
-  const store = await getStoreStatus(now, settings);
-
-  if (!store.isOpen)
-    return res.status(409).json({
-      success: false,
-      code: "STORE_CLOSED",
-      message:
-        "The store is closed right now. Ordering opens again during store hours.",
-      details: {
-        timezone: store.timezone,
-        localDate: store.localDate,
-        localTime: store.localTime,
-        today: store.today,
-        closesAt: store.closesAt,
-        nextOpen: store.nextOpen,
-      },
-    });
+  const store = input.resolveOnly ? null : await getStoreStatus(now, settings);
 
   const result = await db.transaction(async (tx): Promise<PlacementResult> => {
+    if (context.cart.id !== input.cartId) return { kind: "session" };
     const locked = await lockCart(tx, context.table.id, cutoff);
-    if (!locked) return { kind: "session" };
+    if (!locked || locked.cart.id !== input.cartId) return { kind: "session" };
     const { session, cart } = locked;
+    // The cart lock serializes retries and the client-generated order ID lets
+    // us recognize a committed attempt before checking the current revision.
+    const [existing] = await tx
+      .select({ id: orders.id })
+      .from(orders)
+      .where(and(eq(orders.id, input.requestId), eq(orders.tableSessionId, session.id)))
+      .limit(1);
+    if (existing) {
+      return {
+        kind: "ok",
+        orderId: existing.id,
+        ordersUsed: await countSessionOrders(tx, session.id),
+        replayed: true,
+      };
+    }
+    if (input.resolveOnly) {
+      // With the same lock used by placement, prove the order wasn't created
+      // and fence any delayed copy of the request out of this cart revision.
+      if (cart.version < input.version)
+        return { kind: "conflict", cartId: cart.id };
+      if (cart.version === input.version)
+        await tx.update(carts)
+          .set({ version: cart.version + 1, updatedAt: now })
+          .where(eq(carts.id, cart.id));
+      return {
+        kind: "error",
+        status: 409,
+        code: "ORDER_ATTEMPT_CLOSED",
+        message: "This order was not placed. Review the latest cart before ordering.",
+      };
+    }
     if (cart.version !== input.version)
       return { kind: "conflict", cartId: cart.id };
+
+    if (!store?.isOpen)
+      return {
+        kind: "error",
+        status: 409,
+        code: "STORE_CLOSED",
+        message: "The store is closed right now. Ordering opens again during store hours.",
+        details: { nextOpen: store?.nextOpen },
+      };
 
     // The first order of a new session is the confirmation gate. While it is
     // waiting, another order would leave the session neither open nor
@@ -145,16 +180,7 @@ export const placeOrder = async (req: Request, res: Response) => {
           "Your first order is waiting for staff confirmation. Please wait before placing another order.",
       };
 
-    const [countRow] = await tx
-      .select({ count: sql<number>`count(*)::int` })
-      .from(orders)
-      .where(
-        and(
-          eq(orders.tableSessionId, session.id),
-          inArray(orders.status, ORDER_COUNT_STATUSES),
-        ),
-      );
-    const ordersUsed = countRow?.count ?? 0;
+    const ordersUsed = await countSessionOrders(tx, session.id);
     if (ordersUsed >= context.table.orderLimit)
       return {
         kind: "error",
@@ -221,6 +247,9 @@ export const placeOrder = async (req: Request, res: Response) => {
       return { item, lineTotal };
     });
     const total = fromCents(subtotalCents);
+    // Compare the exact lines we will snapshot, even if the total is unchanged.
+    if (total !== input.total || cartReviewFingerprint(items) !== input.reviewFingerprint)
+      return { kind: "conflict", cartId: cart.id };
 
     const orderNumber = await allocateOrderNumber(
       tx,
@@ -230,6 +259,7 @@ export const placeOrder = async (req: Request, res: Response) => {
     const [created] = await tx
       .insert(orders)
       .values({
+        id: input.requestId,
         orderNumber,
         tableSessionId: session.id,
         tableId: context.table.id,
@@ -287,7 +317,8 @@ export const placeOrder = async (req: Request, res: Response) => {
     case "session":
       return sessionRequired(res);
     case "conflict": {
-      const cart = await loadCartView(result.cartId);
+      const cart = await findCartView(result.cartId);
+      if (!cart) return sessionRequired(res);
       return res.status(409).json({
         success: false,
         code: "CART_VERSION_CONFLICT",
@@ -306,8 +337,8 @@ export const placeOrder = async (req: Request, res: Response) => {
     case "ok": {
       const order = await loadOrderView(result.orderId);
       if (!order) throw new Error("placed order could not be reloaded");
-      const cart = await loadCartView(context.cart.id);
-      return res.status(201).json({
+      const cart = await findCartView(input.cartId);
+      return res.status(result.replayed ? 200 : 201).json({
         success: true,
         currency: CURRENCY,
         data: {

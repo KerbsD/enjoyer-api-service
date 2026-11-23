@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { and, asc, eq, inArray, ne } from "drizzle-orm";
 import { db } from "../db/index.ts";
 import {
@@ -48,6 +49,7 @@ export type CartItemView = CartLine & {
 export type CartView = {
   id: string;
   version: number;
+  reviewFingerprint: string;
   updatedAt: string;
   items: CartItemView[];
   totals: {
@@ -249,26 +251,49 @@ export const loadCartLines = async (
   return lines.map(itemView);
 };
 
-// Reads the shared cart exactly as the customer should see it: current menu
-// prices, selected options, and server-computed totals. The caller scopes the
-// cart to the requesting table token before calling this.
-export const loadCartView = async (cartId: string): Promise<CartView> => {
-  const [cart] = await db
-    .select()
-    .from(carts)
-    .where(eq(carts.id, cartId))
-    .limit(1);
-  if (!cart) throw new Error("cart not found");
+// Hash what checkout displays and snapshots. Explicit tuples keep the wire
+// contract independent of object property ordering and unrelated view fields.
+export const cartReviewFingerprint = (items: CartItemView[]): string =>
+  createHash("sha256").update(JSON.stringify(items.map((line) => [
+    line.id, line.menuItem.id, line.menuItem.name, line.menuItem.price,
+    line.quantity, line.note, line.unitPrice, line.lineTotal,
+    line.options.map((option) => [
+      option.id, option.groupId, option.groupName, option.name, option.priceDelta,
+    ]),
+  ]))).digest("hex");
 
-  const items = await loadCartLines(db, cartId);
-
+// Builds the customer-facing view from a cart row already read by the caller.
+// Passing the active transaction keeps the version, lines and options in one
+// consistent snapshot, including inside a mutation that holds the table locks.
+export const cartViewFrom = async (
+  executor: DbReader,
+  cart: Pick<Cart, "id" | "version" | "updatedAt">,
+): Promise<CartView> => {
+  const items = await loadCartLines(executor, cart.id);
   return {
     id: cart.id,
     version: cart.version,
+    reviewFingerprint: cartReviewFingerprint(items),
     updatedAt: cart.updatedAt.toISOString(),
     items,
     totals: summarizeCart(items),
   };
+};
+
+// Reads the shared cart exactly as the customer should see it: current menu
+// prices, selected options, and server-computed totals. The caller scopes the
+// cart to the requesting table token before calling this.
+export const findCartView = (cartId: string): Promise<CartView | null> =>
+  db.transaction(async (tx) => {
+    const [cart] = await tx.select().from(carts).where(eq(carts.id, cartId)).limit(1);
+    if (!cart) return null;
+    return cartViewFrom(tx, cart);
+  }, { isolationLevel: "repeatable read", accessMode: "read only" });
+
+export const loadCartView = async (cartId: string): Promise<CartView> => {
+  const cart = await findCartView(cartId);
+  if (!cart) throw new Error("cart not found");
+  return cart;
 };
 
 export type DbTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];

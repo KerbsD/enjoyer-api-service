@@ -15,7 +15,8 @@ import {
 
 const router = express.Router();
 // Every cart route is authenticated by the printed table QR token. The cart
-// belongs to the table's current session, so there is no cart id in the URL.
+// belongs to the current session; the expected cart ID on writes binds the
+// request to that visit, but isn't a credential.
 router.use(requireTableSession);
 
 router.get("/", getCart);

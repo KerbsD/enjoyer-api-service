@@ -18,10 +18,15 @@ export const listTablesQuerySchema = z.strictObject({
 export const qrQuerySchema = z.strictObject({ format: z.enum(["png", "svg"]).default("png") });
 // Shape errors are handled as unknown QR codes by the handler, without a DB hit.
 export const resolveTableSchema = z.strictObject({ token: z.string().min(1).max(256) });
+export const resumeTableSchema = z.strictObject({
+  token: z.string().min(1).max(256),
+  sessionId: z.uuid(),
+});
 export const validateCreateTable = validateBody(createTableSchema);
 export const validateUpdateTable = validateBody(updateTableSchema);
 export const validateListTables = validateQuery(listTablesQuerySchema);
 export const validateQrQuery = validateQuery(qrQuerySchema);
 export const validateResolveTable = validateBody(resolveTableSchema);
 export const validateOpenTable = validateBody(resolveTableSchema);
+export const validateResumeTable = validateBody(resumeTableSchema);
 export type ListTablesQuery = z.infer<typeof listTablesQuerySchema>;

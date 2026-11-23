@@ -1,5 +1,6 @@
 import { test, mock, before, after } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import express from "express";
 import { drizzle } from "drizzle-orm/node-postgres";
 
@@ -12,7 +13,8 @@ const client = {
   async query(config: { text: string } | string, params: unknown[] = []) {
     const text = typeof config === "string" ? config : config.text;
     queries.push({ text, params });
-    if (["begin", "commit", "rollback"].includes(text)) return { rows: [] };
+    if (["begin", "begin isolation level repeatable read read only", "commit", "rollback"].includes(text))
+      return { rows: [] };
     assert.ok(replies.length, `Unexpected query: ${text}`);
     const rows = replies.shift()!;
     if (rows instanceof Error) throw rows;
@@ -49,6 +51,7 @@ const { getPublicStoreStatus } =
   await import("../src/controllers/storeHours/public.ts");
 const { default: publicTables } = await import("../src/routes/tables/public.ts");
 const { default: publicCart } = await import("../src/routes/cart/public.ts");
+const { default: publicOrders } = await import("../src/routes/orders/public.ts");
 const { verifyJwt } = await import("../src/middlewares/verifyJwt.ts");
 const { signAccessToken } = await import("../src/lib/tokens.ts");
 const { default: errorHandler } =
@@ -71,6 +74,7 @@ const app = express();
 app.use(express.json());
 app.get("/store/status", getPublicStoreStatus);
 app.use("/tables/cart", publicCart);
+app.use("/tables/orders", publicOrders);
 app.use("/tables", publicTables);
 app.use(verifyJwt);
 app.use("/admin/settings", adminSettings);
@@ -110,9 +114,10 @@ const table = [1, "Table 1", 5, true];
 const sessionRow = (
   status: "pending" | "open" = "pending",
   lastActivityAt = date,
+  id = sessionId,
 ) => [
   [
-    sessionId,
+    id,
     1,
     status,
     date,
@@ -124,6 +129,20 @@ const sessionRow = (
   ],
 ];
 const cartRow = (version = 0) => [[cartId, sessionId, version, date, date]];
+const checkout = {
+  cartId, version: 0, requestId: "55555555-5555-4555-8555-555555555555", total: "300.00",
+  reviewFingerprint: createHash("sha256").update(JSON.stringify([
+    [10, 3, "Latte", "120.00", 2, "less ice", "150.00", "300.00", [
+      [5, 2, "Milk substitution", "Oat milk", "30.00"],
+    ]],
+  ])).digest("hex"),
+};
+const submitOrder = (body: unknown = checkout) =>
+  request("POST", "/tables/orders", body, { role: null, token });
+const orderRow = (status: "received" | "pending_confirmation") => [
+  checkout.requestId, "20261119-001", sessionId, 1, "Table 1", status, "300.00", "300.00",
+  "unpaid", null, null, null, null, null, null, null, date, date,
+];
 const menuItemRow = (id = 3, available = true, hidden = false) => [
   [id, available, hidden],
 ];
@@ -705,6 +724,94 @@ test("opening again reuses the current session and cart", async () => {
   assert.equal(result.data.data.cart.version, 4);
 });
 
+test("resuming reuses the exact remembered session without creating or joining", async () => {
+  setup(
+    defaultSettings,
+    [table],
+    sessionRow(),
+    cartRow(4),
+    sessionRow(),
+    [],
+  );
+  const result = await request(
+    "POST",
+    "/tables/resume",
+    { token, sessionId },
+    { role: null },
+  );
+  assert.equal(result.status, 200);
+  assert.equal(result.data.data.session.id, sessionId);
+  assert.equal(result.data.data.cart.id, cartId);
+  assert.equal(result.data.data.cart.version, 4);
+  assert.equal(result.data.data.cart.items.length, 0);
+  assert.ok(
+    queries.some(({ text }) =>
+      text.startsWith('update "table_sessions" set "last_activity_at"'),
+    ),
+  );
+  assert.ok(!queries.some(({ text }) => /^(insert|delete)\b/.test(text)));
+});
+
+test("resuming never adopts a replacement session", async () => {
+  const replacementSessionId = "33333333-3333-4333-8333-333333333333";
+  setup(
+    defaultSettings,
+    [table],
+    sessionRow("pending", date, replacementSessionId),
+  );
+  const result = await request(
+    "POST",
+    "/tables/resume",
+    { token, sessionId },
+    { role: null },
+  );
+  assert.equal(result.status, 409);
+  assert.equal(result.data.code, "TABLE_SESSION_REQUIRED");
+  assert.equal(result.data.data, undefined);
+  assert.ok(!queries.some(({ text }) => /^(insert|update|delete)\b/.test(text)));
+});
+
+test("resuming an expired visit requires a new visit", async () => {
+  setup(
+    defaultSettings,
+    [table],
+    sessionRow("pending", new Date("2020-01-01T00:00:00.000Z")),
+  );
+  const result = await request(
+    "POST",
+    "/tables/resume",
+    { token, sessionId },
+    { role: null },
+  );
+  assert.equal(result.status, 409);
+  assert.equal(result.data.code, "TABLE_SESSION_REQUIRED");
+  assert.ok(!queries.some(({ text }) => /^(insert|update|delete)\b/.test(text)));
+});
+
+test("resuming validates the session ID and table token", async () => {
+  setup();
+  for (const body of [
+    { token, sessionId: "not-a-uuid" },
+    { token, sessionId: "11111111-1111-1111-1111-111111111111" },
+    { sessionId },
+  ]) {
+    assert.equal(
+      (await request("POST", "/tables/resume", body, { role: null })).status,
+      400,
+    );
+  }
+
+  setup(defaultSettings, []);
+  const unknown = await request(
+    "POST",
+    "/tables/resume",
+    { token, sessionId },
+    { role: null },
+  );
+  assert.equal(unknown.status, 404);
+  assert.equal(unknown.data.code, "INVALID_TABLE_QR");
+});
+
 test("opening closes an idle session before creating a new one", async () => {
   const stale = new Date("2020-01-01T00:00:00.000Z");
   setup(
@@ -745,6 +852,126 @@ test("table opening rejects inactive and unknown QR tokens", async () => {
     (await request("POST", "/tables/open", { token }, { role: null })).status,
     404,
   );
+});
+
+// ---------- Order placement ----------
+
+test("checkout rejects a replacement cart under lock, even at the same version", async () => {
+  const replacement = [["33333333-3333-4333-8333-333333333333", sessionId, 0, date, date]];
+  setup([table], sessionRow(), cartRow(), defaultSettings, [], [], sessionRow(), replacement);
+  const result = await submitOrder();
+  assert.equal(result.status, 409);
+  assert.equal(result.data.code, "TABLE_SESSION_REQUIRED");
+  assert.ok(queries.some(({ text }) => /from "carts".*for update/.test(text)));
+  assert.ok(queries.every(({ text }) => !/^(insert|update|delete)\b/.test(text)));
+});
+
+test("checkout enforces pending, limit, empty and unavailable gates without changing the cart", async () => {
+  for (const [code, responses] of [
+    ["ORDER_AWAITING_CONFIRMATION", [[[checkout.requestId]]]],
+    ["ORDER_LIMIT_REACHED", [[], [[5]]]],
+    ["CART_EMPTY", [[], [[0]], []]],
+    ["MENU_ITEM_UNAVAILABLE", [[], [[0]], [cartItemRow(10, 2, "", 3, "Latte", "120.00", false)], []]],
+    ["OPTION_SELECTION_INVALID", [[], [[0]], [cartItemRow()], [], [itemOptionGroupRow(5, 1)]]],
+  ] satisfies [string, Reply[]][]) {
+    setup([table], sessionRow(), cartRow(), defaultSettings, [], [], sessionRow(), cartRow(), [], ...responses);
+    const result = await submitOrder();
+    assert.ok([400, 409].includes(result.status), code);
+    assert.equal(result.data.code, code);
+    assert.ok(queries.every(({ text }) => !/^(insert|update|delete)\b/.test(text)));
+  }
+});
+
+test("checkout rejects a closed shop and changed details even when version and total match", async () => {
+  setup(
+    [table], sessionRow(), cartRow(), defaultSettings,
+    Array.from({ length: 7 }, (_, day) => [day, null, null, true, date]),
+    [], sessionRow(), cartRow(), [],
+  );
+  const closed = await submitOrder();
+  assert.equal(closed.data.code, "STORE_CLOSED");
+  assert.ok(queries.every(({ text }) => !/^(insert|update|delete)\b/.test(text)));
+
+  setup(
+    [table], sessionRow(), cartRow(), defaultSettings, [], [], sessionRow(), cartRow(), [], [], [[0]],
+    [cartItemRow(10, 2, "less ice", 3, "Renamed Latte")], [optionRow()], [itemOptionGroupRow()],
+    cartRow(), [cartItemRow(10, 2, "less ice", 3, "Renamed Latte")], [optionRow()],
+  );
+  const changed = await submitOrder();
+  assert.equal(changed.status, 409);
+  assert.equal(changed.data.code, "CART_VERSION_CONFLICT");
+  assert.equal(changed.data.data.totals.total, "300.00");
+  assert.notEqual(changed.data.data.reviewFingerprint, checkout.reviewFingerprint);
+  assert.ok(queries.every(({ text }) => !/^(insert|update|delete)\b/.test(text)));
+});
+
+test("checkout snapshots the order and clears the cart in the same transaction", async () => {
+  for (const [sessionStatus, orderStatus] of [
+    ["pending", "pending_confirmation"],
+    ["open", "received"],
+  ] as const) {
+    setup(
+      [table], sessionRow(sessionStatus), cartRow(), defaultSettings, [], [],
+      sessionRow(sessionStatus), cartRow(), [], [], [[0]],
+      [cartItemRow(10, 2, "less ice")], [optionRow()], [itemOptionGroupRow()],
+      [[1]], [[checkout.requestId]], [[20]], [], [], [], [],
+      [orderRow(orderStatus)], [[20, checkout.requestId, 3, "Latte", "120.00", 2, "less ice", "300.00"]],
+      [[30, 20, "Oat milk", "Milk substitution", "30.00"]], cartRow(1), [],
+    );
+    const result = await submitOrder();
+    assert.equal(result.status, 201);
+    assert.equal(result.data.data.order.status, orderStatus);
+    assert.equal(result.data.data.order.items[0].note, "less ice");
+    assert.equal(result.data.data.order.items[0].options[0].priceDelta, "30.00");
+    assert.equal(result.data.data.cart.version, 1);
+    assert.deepEqual(result.data.data.cart.items, []);
+    assert.equal(result.data.data.summary.ordersRemaining, 4);
+    const insert = queries.findIndex(({ text }) => text.startsWith('insert into "orders"'));
+    const clear = queries.findIndex(({ text }) => text.startsWith('delete from "cart_items"'));
+    assert.ok(insert > 0 && clear > insert && queries.findIndex(({ text }) => text === "commit") > clear);
+    assert.ok(queries[insert].params.includes(checkout.requestId));
+    assert.ok(queries[insert].params.includes(orderStatus));
+    assert.ok(queries.find(({ text }) => text.startsWith('insert into "order_items"'))?.params.includes("less ice"));
+  }
+});
+
+test("retrying a committed order returns its receipt without rewriting a newer cart", async () => {
+  setup(
+    [table], sessionRow(), cartRow(2), defaultSettings, [], [],
+    sessionRow(), cartRow(2), [[checkout.requestId]], [[1]],
+    [orderRow("pending_confirmation")], [], cartRow(2), [],
+  );
+  const replay = await submitOrder();
+  assert.equal(replay.status, 200);
+  assert.equal(replay.data.data.order.id, checkout.requestId);
+  assert.equal(replay.data.data.cart.version, 2);
+  assert.ok(queries.every(({ text }) => !/^(insert|update|delete)\b/.test(text)));
+});
+
+test("resolution fences off a delayed placement without clearing its cart", async () => {
+  setup([table], sessionRow(), cartRow(), defaultSettings, sessionRow(), cartRow(), [], []);
+  const closed = await submitOrder({ ...checkout, resolveOnly: true });
+  assert.equal(closed.status, 409);
+  assert.equal(closed.data.code, "ORDER_ATTEMPT_CLOSED");
+  assert.equal(queries.filter(({ text }) => text.startsWith('update "carts"')).length, 1);
+  assert.ok(queries.every(({ text }) => !/^(insert|delete)\b/.test(text)));
+
+  setup([table], sessionRow(), cartRow(1), defaultSettings, [], [], sessionRow(), cartRow(1), [], cartRow(1), [cartItemRow()], [optionRow()]);
+  const delayed = await submitOrder();
+  assert.equal(delayed.data.code, "CART_VERSION_CONFLICT");
+  assert.equal(delayed.data.data.items.length, 1);
+  assert.ok(queries.every(({ text }) => !/^(insert|update|delete)\b/.test(text)));
+});
+
+test("resolution returns a committed receipt instead of fencing a newer cart", async () => {
+  setup(
+    [table], sessionRow(), cartRow(1), defaultSettings, sessionRow(), cartRow(1),
+    [[checkout.requestId]], [[1]], [orderRow("pending_confirmation")], [], cartRow(1), [],
+  );
+  const placed = await submitOrder({ ...checkout, resolveOnly: true });
+  assert.equal(placed.status, 200);
+  assert.equal(placed.data.data.order.id, checkout.requestId);
+  assert.ok(queries.every(({ text }) => !/^(insert|update|delete)\b/.test(text)));
 });
 
 // ---------- Shared cart ----------
@@ -791,6 +1018,20 @@ test("cart reads show current prices, options and server totals", async () => {
   assert.equal(line.unitPrice, "150.00");
   assert.equal(line.lineTotal, "300.00");
   assert.equal(line.options[0].name, "Oat milk");
+  const start = queries.findIndex(({ text }) => text === "begin isolation level repeatable read read only");
+  assert.notEqual(start, -1);
+  assert.deepEqual(
+    queries.slice(start + 1, start + 4).map(({ text }) => text.match(/ from "([^"]+)"/)?.[1]),
+    ["carts", "cart_items", "cart_item_options"],
+  );
+  assert.equal(queries[start + 4]?.text, "commit");
+});
+
+test("a cart removed before the snapshot requires a new visit", async () => {
+  setup([table], sessionRow(), cartRow(0), []);
+  const result = await request("GET", "/tables/cart", undefined, { role: null, token });
+  assert.equal(result.status, 409);
+  assert.equal(result.data.code, "TABLE_SESSION_REQUIRED");
 });
 
 test("cart adds merge matching lines and validate option rules", async () => {
@@ -815,7 +1056,7 @@ test("cart adds merge matching lines and validate option rules", async () => {
   const result = await request(
     "POST",
     "/tables/cart/items",
-    { menuItemId: 3, quantity: 2, optionIds: [5], version: 0 },
+    { menuItemId: 3, quantity: 2, optionIds: [5], cartId, version: 0 },
     { role: null, token },
   );
   assert.equal(result.status, 200);
@@ -844,7 +1085,7 @@ test("cart adds merge matching lines and validate option rules", async () => {
   const missingOption = await request(
     "POST",
     "/tables/cart/items",
-    { menuItemId: 3, quantity: 1, optionIds: [], version: 0 },
+    { menuItemId: 3, quantity: 1, optionIds: [], cartId, version: 0 },
     { role: null, token },
   );
   assert.equal(missingOption.status, 400);
@@ -866,7 +1107,7 @@ test("stale cart versions return 409 with the latest cart", async () => {
   const result = await request(
     "POST",
     "/tables/cart/items",
-    { menuItemId: 3, quantity: 1, version: 0 },
+    { menuItemId: 3, quantity: 1, cartId, version: 0 },
     { role: null, token },
   );
   assert.equal(result.status, 409);
@@ -874,8 +1115,12 @@ test("stale cart versions return 409 with the latest cart", async () => {
   assert.equal(result.data.data.version, 5);
 });
 
-test("cart edits reject malformed versions and unknown lines", async () => {
-  for (const query of ["", "?version=-1", "?version=abc", "?version=1.5"]) {
+test("cart writes reject missing cart IDs, malformed versions and unknown lines", async () => {
+  for (const query of [
+    "?version=0",
+    "?cartId=invalid&version=0",
+    ...["-1", "abc", "1.5"].map((version) => `?cartId=${cartId}&version=${version}`),
+  ]) {
     setup([table], sessionRow(), cartRow(0));
     assert.equal(
       (
@@ -886,6 +1131,13 @@ test("cart edits reject malformed versions and unknown lines", async () => {
       ).status,
       400,
     );
+  }
+  for (const [method, path, value] of [
+    ["POST", "/tables/cart/items", { menuItemId: 3, version: 0 }],
+    ["PATCH", "/tables/cart/items/99", { quantity: 2, version: 0 }],
+  ] as const) {
+    setup([table], sessionRow(), cartRow(0));
+    assert.equal((await request(method, path, value, { role: null, token })).status, 400);
   }
 
   setup(
@@ -900,7 +1152,7 @@ test("cart edits reject malformed versions and unknown lines", async () => {
   const missing = await request(
     "PATCH",
     "/tables/cart/items/99",
-    { quantity: 2, version: 0 },
+    { quantity: 2, cartId, version: 0 },
     { role: null, token },
   );
   assert.equal(missing.status, 404);
@@ -930,7 +1182,7 @@ test("cart updates replace options and recalculate totals", async () => {
   const result = await request(
     "PATCH",
     "/tables/cart/items/10",
-    { quantity: 1, optionIds: [5], note: "", version: 0 },
+    { quantity: 1, optionIds: [5], note: "", cartId, version: 0 },
     { role: null, token },
   );
   assert.equal(result.status, 200);
@@ -958,7 +1210,7 @@ test("cart deletes remove one line or clear the whole cart", async () => {
   );
   const removed = await request(
     "DELETE",
-    "/tables/cart/items/10?version=0",
+    `/tables/cart/items/10?cartId=${cartId}&version=0`,
     undefined,
     { role: null, token },
   );
@@ -979,7 +1231,7 @@ test("cart deletes remove one line or clear the whole cart", async () => {
     cartRow(2),
     [],
   );
-  const cleared = await request("DELETE", "/tables/cart?version=1", undefined, {
+  const cleared = await request("DELETE", `/tables/cart?cartId=${cartId}&version=1`, undefined, {
     role: null,
     token,
   });
@@ -990,6 +1242,26 @@ test("cart deletes remove one line or clear the whole cart", async () => {
     subtotal: "0.00",
     total: "0.00",
   });
+});
+
+test("all cart writes reject a different locked cart even if the version matches", async () => {
+  const replacementCartId = "33333333-3333-4333-8333-333333333333";
+  const replacementCart = [[replacementCartId, sessionId, 0, date, date]];
+  for (const [method, path, body] of [
+    ["POST", "/tables/cart/items", { menuItemId: 3, cartId, version: 0 }],
+    ["PATCH", "/tables/cart/items/10", { quantity: 1, cartId, version: 0 }],
+    ["DELETE", `/tables/cart/items/10?cartId=${cartId}&version=0`, undefined],
+    ["DELETE", `/tables/cart?cartId=${cartId}&version=0`, undefined],
+  ] as const) {
+    setup([table], sessionRow(), cartRow(0), defaultSettings, sessionRow(), replacementCart);
+    const result = await request(method, path, body, { role: null, token });
+    assert.equal(result.status, 409, `${method} ${path}`);
+    assert.equal(result.data.code, "TABLE_SESSION_REQUIRED");
+    assert.equal(result.data.data, undefined);
+    assert.ok(queries.some(({ text }) => /from "carts".*for update/.test(text)));
+    assert.ok(!queries.some(({ text }) => /^(insert|update|delete)\b/.test(text)));
+    assert.equal(replies.length, 0);
+  }
 });
 
 test("cart mutations close a session that outlived the idle timeout", async () => {
@@ -1006,7 +1278,7 @@ test("cart mutations close a session that outlived the idle timeout", async () =
   const result = await request(
     "POST",
     "/tables/cart/items",
-    { menuItemId: 3, quantity: 1, version: 0 },
+    { menuItemId: 3, quantity: 1, cartId, version: 0 },
     { role: null, token },
   );
   assert.equal(result.status, 409);

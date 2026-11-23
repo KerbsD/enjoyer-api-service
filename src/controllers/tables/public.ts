@@ -4,7 +4,7 @@ import { db } from "../../db/index.ts";
 import { carts, shopTables, tableSessions } from "../../db/schema.ts";
 import type { TableSession } from "../../db/schema.ts";
 import { CURRENCY } from "../../configs/currency.ts";
-import { loadCartView } from "../../lib/cart.ts";
+import { cartViewFrom, loadCartView } from "../../lib/cart.ts";
 import { readShopSettings } from "../../lib/settings.ts";
 import { idleCutoff } from "../../lib/tableSessions.ts";
 import { isWellFormedToken } from "../../lib/tokens.ts";
@@ -148,6 +148,107 @@ export const openTable = async (req: Request, res: Response) => {
       },
       cart: await loadCartView(result.cart.id),
       created: result.created,
+    },
+  });
+};
+
+// Resumes the exact visit remembered by a tab. Unlike /tables/open this never
+// creates a session or adopts the table's current one: it locks the table then
+// the session and succeeds only when the live session still matches the
+// remembered ID. A replacement or expired visit therefore returns
+// TABLE_SESSION_REQUIRED instead of being joined silently.
+export const resumeTable = async (req: Request, res: Response) => {
+  const { token, sessionId } = req.body as {
+    token: string;
+    sessionId: string;
+  };
+  if (!isWellFormedToken(token)) return invalidTable(res);
+
+  const settings = await readShopSettings();
+  const now = new Date();
+  const cutoff = idleCutoff(settings, now);
+
+  const result = await db.transaction(async (tx) => {
+    const [table] = await tx
+      .select({
+        id: shopTables.id,
+        name: shopTables.name,
+        orderLimit: shopTables.orderLimit,
+        active: shopTables.active,
+      })
+      .from(shopTables)
+      .where(eq(shopTables.qrToken, token))
+      .limit(1)
+      .for("update");
+    if (!table?.active) return { kind: "invalid" as const };
+
+    const [session] = await tx
+      .select()
+      .from(tableSessions)
+      .where(
+        and(
+          eq(tableSessions.tableId, table.id),
+          ne(tableSessions.status, "closed"),
+        ),
+      )
+      .limit(1)
+      .for("update");
+    if (
+      !session ||
+      session.id !== sessionId ||
+      session.lastActivityAt.getTime() < cutoff.getTime()
+    )
+      return { kind: "ended" as const };
+
+    const [cart] = await tx
+      .select()
+      .from(carts)
+      .where(eq(carts.tableSessionId, session.id))
+      .limit(1)
+      .for("update");
+    if (!cart) return { kind: "ended" as const };
+
+    const [updated] = await tx
+      .update(tableSessions)
+      .set({ lastActivityAt: now })
+      .where(eq(tableSessions.id, session.id))
+      .returning();
+    if (!updated) return { kind: "ended" as const };
+
+    return {
+      kind: "ok" as const,
+      table,
+      session: updated,
+      cart: await cartViewFrom(tx, cart),
+    };
+  });
+
+  if (result.kind === "invalid") return invalidTable(res);
+  if (result.kind === "ended")
+    return res.status(409).json({
+      success: false,
+      code: "TABLE_SESSION_REQUIRED",
+      message:
+        "This visit has ended. Scan the table QR code again to start a new visit.",
+    });
+
+  return res.json({
+    success: true,
+    currency: CURRENCY,
+    data: {
+      table: {
+        id: result.table.id,
+        name: result.table.name,
+        orderLimit: result.table.orderLimit,
+      },
+      session: {
+        id: result.session.id,
+        status: result.session.status,
+        createdAt: result.session.createdAt,
+        startedAt: result.session.startedAt,
+        lastActivityAt: result.session.lastActivityAt,
+      },
+      cart: result.cart,
     },
   });
 };

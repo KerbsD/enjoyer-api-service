@@ -59,5 +59,10 @@
     "drizzle-kit": "^0.31.11",
     "pino-pretty": "^13.2.0",
     "typescript": "^7.0.2"
+  },
+  "overrides": {
+    "@esbuild-kit/core-utils": {
+      "esbuild": "0.25.12"
+    }
   }
 }

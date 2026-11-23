@@ -10,7 +10,12 @@ import { booleanQueryField, paginationFields } from "./shared.ts";
 const INT4_MAX = 2_147_483_647;
 
 export const placeOrderSchema = z.strictObject({
+  cartId: z.uuid(),
   version: z.number().int().min(0),
+  requestId: z.uuidv4(),
+  total: z.string().regex(/^\d{1,12}\.\d{2}$/),
+  reviewFingerprint: z.string().regex(/^[0-9a-f]{64}$/),
+  resolveOnly: z.literal(true).optional(),
 });
 
 export const listStaffOrdersQuerySchema = z.strictObject({

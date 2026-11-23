@@ -10,7 +10,7 @@ import {
 } from "../../db/schema.ts";
 import { CURRENCY } from "../../configs/currency.ts";
 import {
-  loadCartView,
+  findCartView,
   loadItemOptionGroups,
   lockCart,
   validateOptionSelection,
@@ -88,22 +88,28 @@ const itemNotFound = (res: Response) =>
 
 const respond = async (res: Response, result: MutationResult) => {
   switch (result.kind) {
-    case "ok":
+    case "ok": {
+      const cart = await findCartView(result.cartId);
+      if (!cart) return sessionRequired(res);
       return res.json({
         success: true,
         currency: CURRENCY,
-        data: await loadCartView(result.cartId),
+        data: cart,
       });
-    case "conflict":
+    }
+    case "conflict": {
       // Send the latest cart so the client can re-render and retry without an
       // extra round trip.
+      const cart = await findCartView(result.cartId);
+      if (!cart) return sessionRequired(res);
       return res.status(409).json({
         success: false,
         code: "CART_VERSION_CONFLICT",
         message:
           "The cart changed on another device. Review the latest cart and try again.",
-        data: await loadCartView(result.cartId),
+        data: cart,
       });
+    }
     case "session":
       return sessionRequired(res);
     case "not-found":
@@ -135,12 +141,13 @@ const bumpCart = async (
     .where(eq(tableSessions.id, sessionId));
 };
 
-// Query the active session and cart under lock, then verify the version. Every
+// Query the active session and cart under lock, then verify identity and version. Every
 // mutation starts here so the version rule is identical everywhere.
 const beginMutation = async (
   tx: DbTransaction,
   tableId: number,
   cutoff: Date,
+  cartId: string,
   version: number,
 ): Promise<
   | { kind: "locked"; locked: LockedCart }
@@ -148,7 +155,7 @@ const beginMutation = async (
   | { kind: "conflict"; cartId: string }
 > => {
   const locked = await lockCart(tx, tableId, cutoff);
-  if (!locked) return { kind: "session" };
+  if (!locked || locked.cart.id !== cartId) return { kind: "session" };
   if (locked.cart.version !== version)
     return { kind: "conflict", cartId: locked.cart.id };
   return { kind: "locked", locked };
@@ -215,10 +222,12 @@ const checkItem = async (
 
 export const getCart = async (_req: Request, res: Response) => {
   const context = getTableSessionContext(res);
+  const cart = await findCartView(context.cart.id);
+  if (!cart) return sessionRequired(res);
   return res.json({
     success: true,
     currency: CURRENCY,
-    data: await loadCartView(context.cart.id),
+    data: cart,
   });
 };
 
@@ -235,6 +244,7 @@ export const addCartItem = async (req: Request, res: Response) => {
         tx,
         context.table.id,
         cutoff,
+        input.cartId,
         input.version,
       );
       if (started.kind !== "locked") return started;
@@ -323,6 +333,7 @@ export const updateCartItem = async (req: Request, res: Response) => {
         tx,
         context.table.id,
         cutoff,
+        input.cartId,
         input.version,
       );
       if (started.kind !== "locked") return started;
@@ -376,7 +387,7 @@ export const deleteCartItem = async (req: Request, res: Response) => {
   if (!id) return itemNotFound(res);
 
   const context = getTableSessionContext(res);
-  const { version } = res.locals.query as CartVersionQuery;
+  const { cartId, version } = res.locals.query as CartVersionQuery;
   const settings = await readShopSettings();
   const now = new Date();
   const cutoff = idleCutoff(settings, now);
@@ -387,6 +398,7 @@ export const deleteCartItem = async (req: Request, res: Response) => {
         tx,
         context.table.id,
         cutoff,
+        cartId,
         version,
       );
       if (started.kind !== "locked") return started;
@@ -408,7 +420,7 @@ export const deleteCartItem = async (req: Request, res: Response) => {
 
 export const clearCart = async (req: Request, res: Response) => {
   const context = getTableSessionContext(res);
-  const { version } = res.locals.query as CartVersionQuery;
+  const { cartId, version } = res.locals.query as CartVersionQuery;
   const settings = await readShopSettings();
   const now = new Date();
   const cutoff = idleCutoff(settings, now);
@@ -419,6 +431,7 @@ export const clearCart = async (req: Request, res: Response) => {
         tx,
         context.table.id,
         cutoff,
+        cartId,
         version,
       );
       if (started.kind !== "locked") return started;

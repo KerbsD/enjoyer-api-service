@@ -1,6 +1,6 @@
 import { test, mock } from "node:test";
 import assert from "node:assert/strict";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { Pool } from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
@@ -161,6 +161,53 @@ test(
       return { result, res };
     }
     const fingerprint = { ip: "192.0.2.1", userAgent: "IntegrationBrowser" };
+
+    await t.test("concurrent checkout retries create one order visible to staff", async () => {
+      const { tableSessions, carts, cartItems } = await import("../../src/db/schema.ts");
+      const { placeOrder } = await import("../../src/controllers/orders/public.ts");
+      const { loadCartView } = await import("../../src/lib/cart.ts");
+      const { listStaffOrders } = await import("../../src/controllers/orders/staff.ts");
+      const [table] = await db.insert(shopTables).values({
+        name: "Checkout integration table", qrToken: newToken(),
+      }).returning();
+      const [session] = await db.insert(tableSessions).values({ tableId: table.id }).returning();
+      const [cart] = await db.insert(carts).values({ tableSessionId: session.id }).returning();
+      const [category] = await db.insert(categories).values({ name: "Checkout category" }).returning();
+      const [item] = await db.insert(menuItems).values({
+        categoryId: category.id, name: "Checkout latte", price: "120.00",
+      }).returning();
+      await db.insert(cartItems).values({
+        cartId: cart.id, menuItemId: item.id, quantity: 2, note: "less ice",
+      });
+
+      const reviewed = await loadCartView(cart.id);
+      const body = {
+        cartId: cart.id, version: cart.version, requestId: randomUUID(), total: reviewed.totals.total,
+        reviewFingerprint: reviewed.reviewFingerprint,
+      };
+      const attempts = [response(), response()];
+      await Promise.all(attempts.map(async ({ res }) => {
+        res.locals = { tableSession: { table, session, cart } };
+        await placeOrder({ body } as Request, res);
+      }));
+      assert.deepEqual(attempts.map(({ result }) => result.status).sort(), [200, 201]);
+      for (const { result } of attempts) {
+        assert.equal(result.body.data.order.id, body.requestId);
+        assert.deepEqual(result.body.data.cart.items, []);
+        assert.equal(result.body.data.cart.version, cart.version + 1);
+      }
+
+      const board = response();
+      board.res.locals = { query: { tableId: table.id, activeSessionOnly: true, limit: 20, offset: 0 } };
+      await listStaffOrders({} as Request, board.res);
+      assert.equal(board.result.body.data.length, 1);
+      const [order] = board.result.body.data;
+      assert.equal(order.id, body.requestId);
+      assert.equal(order.status, "pending_confirmation");
+      assert.equal(order.items[0].name, "Checkout latte");
+      assert.equal(order.items[0].note, "less ice");
+      assert.equal(order.items[0].lineTotal, "240.00");
+    });
 
     await t.test("realtime sees committed changes across connections and isolates table sessions", async () => {
       const { readRevisions } = await import("../../src/lib/realtime/revisions.ts");

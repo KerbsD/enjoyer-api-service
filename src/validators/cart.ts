@@ -4,6 +4,7 @@ import { validateBody, validateQuery } from "../lib/validate.ts";
 const INT4_MAX = 2_147_483_647;
 const idField = z.number().int().min(1).max(INT4_MAX);
 const versionField = z.number().int().min(0);
+const cartIdField = z.uuid();
 const quantityField = z.number().int().min(1).max(99);
 const noteField = z.string().trim().max(500);
 const optionIdsField = z
@@ -19,6 +20,7 @@ export const addCartItemSchema = z.strictObject({
   quantity: quantityField.default(1),
   optionIds: optionIdsField.default([]),
   note: noteField.default(""),
+  cartId: cartIdField,
   version: versionField,
 });
 
@@ -27,6 +29,7 @@ export const updateCartItemSchema = z
     quantity: quantityField.optional(),
     optionIds: optionIdsField.optional(),
     note: noteField.optional(),
+    cartId: cartIdField,
     version: versionField,
   })
   .refine(
@@ -38,6 +41,7 @@ export const updateCartItemSchema = z
   );
 
 export const cartVersionQuerySchema = z.strictObject({
+  cartId: cartIdField,
   version: z.coerce.number().int().min(0),
 });
 

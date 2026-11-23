@@ -410,11 +410,12 @@ store.
 | Method | Path | Authentication / purpose |
 | --- | --- | --- |
 | POST | `/tables/open` | Public: `{ "token": "QR_TOKEN" }`; create or reuse the session and cart |
+| POST | `/tables/resume` | Public: `{ "token": "QR_TOKEN", "sessionId": "UUID" }`; resume that exact visit only |
 | GET | `/tables/cart` | `X-Table-Token`: current cart with current prices |
-| POST | `/tables/cart/items` | Add a line; requires `version` |
-| PATCH | `/tables/cart/items/:id` | Edit quantity, note or options; requires `version` |
-| DELETE | `/tables/cart/items/:id?version=N` | Remove one line |
-| DELETE | `/tables/cart?version=N` | Clear the cart |
+| POST | `/tables/cart/items` | Add a line; body requires `cartId` and `version` |
+| PATCH | `/tables/cart/items/:id` | Edit quantity, note or options; body requires `cartId` and `version` |
+| DELETE | `/tables/cart/items/:id?cartId=UUID&version=N` | Remove one line |
+| DELETE | `/tables/cart?cartId=UUID&version=N` | Clear the cart |
 
 `POST /tables/open` returns the table, the provisional session
 (`status: "pending"`) and its empty or existing cart. Scanning again reuses the
@@ -424,16 +425,27 @@ job also closes idle sessions; cart mutations enforce the timeout inline as a
 race guard. The session becomes `open` only when staff confirm the first order
 in a later phase.
 
+`POST /tables/resume` is the same-tab refresh path. It locks the table and
+session, then returns the visit only when the live session still matches the
+supplied `sessionId` and has not exceeded the idle timeout. It never creates a
+session, joins the table's current one, or closes an expired one; any mismatch
+returns 409 `TABLE_SESSION_REQUIRED`. A visit replaced while the page was closed
+therefore cannot be adopted silently.
+
 Cart requests send the printed QR token in `X-Table-Token`, never in the URL.
 CORS allows that header for the customer frontend. A malformed, unknown or
 inactive token returns 404 `INVALID_TABLE_QR`; inactive tables are rejected
 before any session work. A valid table with no live session returns 409
 `TABLE_SESSION_REQUIRED`; the customer must scan/open again.
 
-Every mutation includes the cart `version` it last saw. A stale version returns
-409 `CART_VERSION_CONFLICT` with the latest cart in `data`, so the client can
-re-render and retry. Mutations lock the session then the cart, bump the version
-and update the session’s `lastActivityAt`.
+Every mutation includes the cart `id` (sent as `cartId`) and `version` it last saw.
+The ID is an identity check, not a credential. Mutations lock the session then
+the cart and compare both values before changing anything. If the cart belongs
+to a different visit, the API returns 409 `TABLE_SESSION_REQUIRED` without
+returning the replacement cart. A stale version on the same cart returns 409
+`CART_VERSION_CONFLICT` with the latest cart in `data` for review. Successful
+writes bump the version and update the session’s `lastActivityAt`. Cart views
+read the version, lines and options from a single database snapshot.
 
 Example add body:
 
@@ -443,6 +455,7 @@ Example add body:
   "quantity": 2,
   "optionIds": [5],
   "note": "no sugar",
+  "cartId": "22222222-2222-4222-8222-222222222222",
   "version": 0
 }
 ```
@@ -477,12 +490,26 @@ are scoped to the table's current session:
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| POST | `/tables/orders` | Submit the shared cart; body is `{ "version": 3 }` |
+| POST | `/tables/orders` | Submit or resolve an explicitly reviewed cart; body requires `cartId`, `version`, `requestId`, `total` and `reviewFingerprint` |
 | GET | `/tables/orders` | List this session's orders, total and remaining limit |
 | POST | `/tables/orders/:id/cancel` | Cancel an order while Pending confirmation or Received |
 
-Placement checks store hours, cart version and emptiness, table order limit,
-item/option availability and option-group selection rules in one transaction.
+Send the reviewed cart UUID as `cartId`, its `version`, its exact two-decimal
+`total` string, its `reviewFingerprint` from the cart response and a fresh
+UUIDv4 as `requestId`. Placement checks the cart identity and version under
+lock and rejects changes to the reviewed lines even if the version and total
+are unchanged. Repeating a committed request ID in the same visit
+returns the original order with HTTP 200 without clearing or changing the
+cart again; a new order returns HTTP 201. If a response is lost, check the
+visit's order list for an order whose `id` equals `requestId` before offering
+a retry with the same body. If the revision can no longer be retried, send the
+same body with `resolveOnly: true`. It returns the existing receipt or
+`409 ORDER_ATTEMPT_CLOSED`; in the latter case, the reviewed version can no
+longer be used to place the order. Resolution never places an order or removes
+cart items. A replacement visit never accepts the old cart ID.
+
+Placement also checks store hours, cart emptiness, table order limit,
+item/option availability and option-group selection rules.
 It snapshots item and option names/prices, clears the cart and increments the
 cart version atomically. A provisional session's first order is
 `pending_confirmation`; after Staff confirms it, the session opens and later

@@ -491,8 +491,8 @@ are scoped to the table's current session:
 | Method | Path | Purpose |
 | --- | --- | --- |
 | POST | `/tables/orders` | Submit or resolve an explicitly reviewed cart; body requires `cartId`, `version`, `requestId`, `total` and `reviewFingerprint` |
-| GET | `/tables/orders` | List this session's orders, total and remaining limit |
-| POST | `/tables/orders/:id/cancel` | Cancel an order while Pending confirmation or Received |
+| GET | `/tables/orders?sessionId=UUID` | List this visit's orders, total and remaining limit |
+| POST | `/tables/orders/:id/cancel?sessionId=UUID` | Cancel an order while Pending confirmation or Received |
 
 Send the reviewed cart UUID as `cartId`, its `version`, its exact two-decimal
 `total` string, its `reviewFingerprint` from the cart response and a fresh
@@ -507,6 +507,13 @@ same body with `resolveOnly: true`. It returns the existing receipt or
 `409 ORDER_ATTEMPT_CLOSED`; in the latter case, the reviewed version can no
 longer be used to place the order. Resolution never places an order or removes
 cart items. A replacement visit never accepts the old cart ID.
+
+Customer clients send the remembered `sessionId` on list and cancellation
+requests in addition to the QR header. If it no longer matches the active visit,
+the API returns `409 TABLE_SESSION_REQUIRED`, not the next visit's orders.
+Closed or idle-expired visits cannot list or cancel orders. Cancellation does
+not restore items to the cart; cancelled and rejected orders remain visible for
+the visit but do not count toward its total or limit.
 
 Placement also checks store hours, cart emptiness, table order limit,
 item/option availability and option-group selection rules.

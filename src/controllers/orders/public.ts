@@ -358,9 +358,20 @@ export const placeOrder = async (req: Request, res: Response) => {
   }
 };
 
-export const listCustomerOrders = async (_req: Request, res: Response) => {
+export const listCustomerOrders = async (req: Request, res: Response) => {
   const context = getTableSessionContext(res);
-  const views = await loadSessionOrders(context.session.id);
+  if (req.query.sessionId !== undefined && req.query.sessionId !== context.session.id)
+    return sessionRequired(res);
+  const settings = await readShopSettings();
+  const result = await db.transaction(async (tx) => {
+    const [session] = await tx.select().from(tableSessions)
+      .where(eq(tableSessions.id, context.session.id)).limit(1);
+    if (!session || session.status === "closed" ||
+        session.lastActivityAt < idleCutoff(settings, new Date())) return null;
+    return { session, views: await loadSessionOrders(session.id, tx) };
+  }, { isolationLevel: "repeatable read", accessMode: "read only" });
+  if (!result) return sessionRequired(res);
+  const { session, views } = result;
   const summary = summarizeOrders(views);
 
   return res.json({
@@ -368,11 +379,11 @@ export const listCustomerOrders = async (_req: Request, res: Response) => {
     currency: CURRENCY,
     data: {
       session: {
-        id: context.session.id,
-        status: context.session.status,
-        createdAt: context.session.createdAt.toISOString(),
-        startedAt: context.session.startedAt?.toISOString() ?? null,
-        lastActivityAt: context.session.lastActivityAt.toISOString(),
+        id: session.id,
+        status: session.status,
+        createdAt: session.createdAt.toISOString(),
+        startedAt: session.startedAt?.toISOString() ?? null,
+        lastActivityAt: session.lastActivityAt.toISOString(),
       },
       orders: views,
       summary: {
@@ -397,7 +408,9 @@ export const cancelCustomerOrder = async (req: Request, res: Response) => {
   if (!id) return orderNotFound(res);
 
   const context = getTableSessionContext(res);
-  const now = new Date();
+  if (req.query.sessionId !== undefined && req.query.sessionId !== context.session.id)
+    return sessionRequired(res);
+  const settings = await readShopSettings();
 
   const result = await db.transaction(
     async (
@@ -409,7 +422,7 @@ export const cancelCustomerOrder = async (req: Request, res: Response) => {
       | { kind: "ok"; id: string }
     > => {
       const [order] = await tx
-        .select()
+        .select({ id: orders.id, status: orders.status })
         .from(orders)
         .where(
           and(
@@ -429,7 +442,9 @@ export const cancelCustomerOrder = async (req: Request, res: Response) => {
         .where(eq(tableSessions.id, context.session.id))
         .limit(1)
         .for("update");
-      if (!session || session.status === "closed") return { kind: "session" };
+      const now = new Date();
+      if (!session || session.status === "closed" ||
+          session.lastActivityAt < idleCutoff(settings, now)) return { kind: "session" };
 
       if (!CUSTOMER_CANCELLABLE_STATUSES.includes(order.status)) {
         const code =

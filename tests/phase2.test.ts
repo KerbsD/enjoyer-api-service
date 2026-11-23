@@ -974,6 +974,63 @@ test("resolution returns a committed receipt instead of fencing a newer cart", a
   assert.ok(queries.every(({ text }) => !/^(insert|update|delete)\b/.test(text)));
 });
 
+// ---------- Table order tracking ----------
+
+test("a remembered visit cannot list or cancel orders in its replacement", async () => {
+  const staleId = "33333333-3333-4333-8333-333333333333";
+  for (const method of ["GET", "POST"]) {
+    setup([table], sessionRow(), cartRow());
+    const path = method === "GET" ? "/tables/orders" : `/tables/orders/${checkout.requestId}/cancel`;
+    const result = await request(method, `${path}?sessionId=${staleId}`, undefined, { role: null, token });
+    assert.equal(result.status, 409);
+    assert.equal(result.data.code, "TABLE_SESSION_REQUIRED");
+    assert.equal(result.data.data, undefined);
+    assert.ok(queries.every(({ text }) => !text.includes('from "orders"')));
+  }
+});
+
+test("tracking snapshots current orders and excludes cancelled totals and capacity", async () => {
+  const cancelled = orderRow("received");
+  cancelled[0] = "33333333-3333-4333-8333-333333333333";
+  cancelled[5] = "cancelled";
+  setup([table], sessionRow("open"), cartRow(), defaultSettings, sessionRow("open"),
+    [orderRow("received"), cancelled], [],);
+  const result = await request("GET", `/tables/orders?sessionId=${sessionId}`, undefined, { role: null, token });
+  assert.equal(result.status, 200);
+  assert.equal(result.data.data.session.id, sessionId);
+  assert.equal(result.data.data.orders.length, 2);
+  assert.equal(result.data.data.summary.total, "300.00");
+  assert.equal(result.data.data.summary.ordersRemaining, 4);
+  assert.ok(queries.some(({ text }) => text === "begin isolation level repeatable read read only"));
+});
+
+test("cancellation checks the locked status and never revives an expired visit", async () => {
+  const path = `/tables/orders/${checkout.requestId}/cancel?sessionId=${sessionId}`;
+  for (const [status, session, code] of [
+    ["preparing", sessionRow("open"), "ORDER_NOT_CANCELLABLE"],
+    ["received", sessionRow("open", new Date("2020-01-01")), "TABLE_SESSION_REQUIRED"],
+  ] as const) {
+    setup([table], sessionRow("open"), cartRow(), defaultSettings, [[checkout.requestId, status]], session);
+    const rejected = await request("POST", path, undefined, { role: null, token });
+    assert.equal(rejected.status, 409);
+    assert.equal(rejected.data.code, code);
+    assert.ok(queries.every(({ text }) => !text.startsWith("update")));
+  }
+});
+
+test("cancelling a live received order changes its status without returning items to the cart", async () => {
+  const cancelled = orderRow("received");
+  cancelled[5] = "cancelled";
+  setup([table], sessionRow("open"), cartRow(), defaultSettings, [[checkout.requestId, "received"]],
+    sessionRow("open"), [], [], [cancelled], []);
+  const path = `/tables/orders/${checkout.requestId}/cancel?sessionId=${sessionId}`;
+  const result = await request("POST", path, undefined, { role: null, token });
+  assert.equal(result.status, 200);
+  assert.equal(result.data.data.status, "cancelled");
+  assert.ok(queries.some(({ text, params }) => text.startsWith('update "orders"') && params.includes("cancelled")));
+  assert.ok(queries.every(({ text }) => !/^(insert|update|delete).*cart/.test(text)));
+});
+
 // ---------- Shared cart ----------
 
 test("cart authentication requires a valid table token and live session", async () => {

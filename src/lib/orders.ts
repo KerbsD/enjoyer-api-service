@@ -159,11 +159,11 @@ const iso = (value: Date | null): string | null =>
 
 // Loads lines and option snapshots for a batch of orders, then assembles the
 // API views. Batched queries keep the staff board from issuing N+1 reads.
-const hydrateOrders = async (rows: OrderRow[]): Promise<OrderView[]> => {
+const hydrateOrders = async (rows: OrderRow[], executor: DbReader = db): Promise<OrderView[]> => {
   if (rows.length === 0) return [];
   const orderIds = rows.map((row) => row.id);
 
-  const itemRows = await db
+  const itemRows = await executor
     .select({
       id: orderItems.id,
       orderId: orderItems.orderId,
@@ -180,7 +180,7 @@ const hydrateOrders = async (rows: OrderRow[]): Promise<OrderView[]> => {
 
   const itemIds = itemRows.map((row) => row.id);
   const optionRows = itemIds.length
-    ? await db
+    ? await executor
         .select({
           id: orderItemOptions.id,
           orderItemId: orderItemOptions.orderItemId,
@@ -260,14 +260,15 @@ export const loadOrderView = async (id: string): Promise<OrderView | null> => {
 
 export const loadSessionOrders = async (
   sessionId: string,
+  executor: DbReader = db,
 ): Promise<OrderView[]> => {
-  const rows = await db
+  const rows = await executor
     .select(orderColumns)
     .from(orders)
     .innerJoin(shopTables, eq(orders.tableId, shopTables.id))
     .where(eq(orders.tableSessionId, sessionId))
     .orderBy(asc(orders.createdAt), asc(orders.id));
-  return hydrateOrders(rows);
+  return hydrateOrders(rows, executor);
 };
 
 // Oldest first: the board should show the queue in the order it arrived.

@@ -11,10 +11,16 @@ import type { RevisionState } from "../src/lib/realtime/revisions.ts";
 import { sseMessages, watchRealtime } from "../src/client/realtime.ts";
 
 let replies: (unknown[] | Error)[] = [];
+let networkValue: string | undefined;
+let networkReads = 0;
 let queries: { text: string; params: unknown[] }[] = [];
 const client = {
   async query(config: { text: string } | string, params: unknown[] = []) {
     const text = typeof config === "string" ? config : config.text;
+    if (params[0] === "ordering_network") {
+      networkReads++;
+      return { rows: networkValue ? [[networkValue]] : [] };
+    }
     queries.push({ text, params });
     assert.ok(replies.length, `Unexpected query: ${text}`);
     const rows = replies.shift()!;
@@ -22,26 +28,47 @@ const client = {
     return { rows };
   },
 };
-mock.module("../src/db/index.ts", { namedExports: { db: drizzle(client as never) } });
-mock.module("../src/configs/env.ts", { namedExports: { env: {
-  NODE_ENV: "test", ACCESS_TOKEN_SECRET: "test-only-realtime-secret-at-least-32-characters",
-  CORS_ORIGINS: ["http://localhost:3000"],
-} } });
-mock.module("../src/lib/logger.ts", { namedExports: {
-  securityLog() {}, serializeError: () => ({}), logger: { error() {}, info() {} },
-} });
+mock.module("../src/db/index.ts", {
+  namedExports: { db: drizzle(client as never) },
+});
+mock.module("../src/configs/env.ts", {
+  namedExports: {
+    env: {
+      NODE_ENV: "test",
+      ACCESS_TOKEN_SECRET: "test-only-realtime-secret-at-least-32-characters",
+      CORS_ORIGINS: ["http://localhost:3000"],
+    },
+  },
+});
+mock.module("../src/lib/logger.ts", {
+  namedExports: {
+    securityLog() {},
+    serializeError: () => ({}),
+    logger: { error() {}, info() {} },
+  },
+});
 mock.module("../src/lib/rateLimitStore.ts", {
-  namedExports: { createStore: () => undefined, redis: null, withRedisBreaker: (run: () => unknown) => run() },
+  namedExports: {
+    createStore: () => undefined,
+    redis: null,
+    withRedisBreaker: (run: () => unknown) => run(),
+  },
 });
 
-const { tableRealtime, staffRealtime } = await import("../src/routes/realtime.ts");
+const { tableRealtime, staffRealtime } =
+  await import("../src/routes/realtime.ts");
 const { signAccessToken } = await import("../src/lib/tokens.ts");
-const { tableAccess, staffAccess } = await import("../src/lib/realtime/access.ts");
+const { tableAccess, staffAccess } =
+  await import("../src/lib/realtime/access.ts");
 const { readRevisions } = await import("../src/lib/realtime/revisions.ts");
-const { openRealtimeStream, closeRealtimeStreams } = await import("../src/lib/realtime/stream.ts");
-const { default: errorHandler } = await import("../src/middlewares/errorHandler.ts");
+const { openRealtimeStream, closeRealtimeStreams } =
+  await import("../src/lib/realtime/stream.ts");
+const { default: errorHandler } =
+  await import("../src/middlewares/errorHandler.ts");
 const { apiTrafficLimiter } = await import("../src/lib/authLimiter.ts");
 const { default: corsOptions } = await import("../src/configs/corsOption.ts");
+const { invalidateRealtimeOrderingNetwork, readRealtimeOrderingNetwork } =
+  await import("../src/lib/orderingNetwork.ts");
 
 const sessionId = "11111111-1111-4111-8111-111111111111";
 const otherSession = "33333333-3333-4333-8333-333333333333";
@@ -54,7 +81,13 @@ const session = [[sessionId, 1, "pending", now, null, now, null, null, null]];
 const cart = [[cartId, sessionId, 0, now, now]];
 const liveSession = [[true, token, "pending", now, cartId]];
 const settingRows = [["idle_timeout_minutes", "180"]];
-const resources = { orders: "a", tables: "b", menu: "c", store: "d", cart: "e" };
+const resources = {
+  orders: "a",
+  tables: "b",
+  menu: "c",
+  store: "d",
+  cart: "e",
+};
 const state: RevisionState = { revision: "a".repeat(64), resources };
 let streamState = state;
 let streamFailure: Awaited<ReturnType<RealtimeAccess["check"]>> = null;
@@ -70,9 +103,17 @@ app.use("/budget", cors(corsOptions), apiTrafficLimiter, (_req, res) => {
 });
 app.use("/tables/realtime", tableRealtime);
 app.use("/staff/realtime", staffRealtime);
-app.get("/test/events", (_req, res) => openRealtimeStream(res, {
-  scope: { kind: "staff" }, key: "test", check: async () => streamFailure,
-}, streamSource));
+app.get("/test/events", (_req, res) =>
+  openRealtimeStream(
+    res,
+    {
+      scope: { kind: "staff" },
+      key: "test",
+      check: async () => streamFailure,
+    },
+    streamSource,
+  ),
+);
 let fallbackRequests: string[] = [];
 app.get("/fallback/events", (_req, res) => {
   fallbackRequests.push("events");
@@ -86,7 +127,8 @@ app.use(errorHandler);
 const server = app.listen(0, "127.0.0.1");
 let base: string;
 before(async () => {
-  if (!server.listening) await new Promise<void>((resolve) => server.once("listening", resolve));
+  if (!server.listening)
+    await new Promise<void>((resolve) => server.once("listening", resolve));
   const address = server.address();
   assert.ok(address && typeof address !== "string");
   base = `http://127.0.0.1:${address.port}`;
@@ -98,15 +140,57 @@ after(async () => {
   await new Promise<void>((resolve) => server.close(() => resolve()));
 });
 
-function setup(...rows: (unknown[] | Error)[]) { replies = rows; queries = []; }
+function setup(...rows: (unknown[] | Error)[]) {
+  replies = rows;
+  queries = [];
+}
+
+test("an active realtime authorization rechecks the approved ordering network", async () => {
+  const access = tableAccess(1, sessionId, token, "127.0.0.1");
+  try {
+    invalidateRealtimeOrderingNetwork();
+    networkValue = JSON.stringify({
+      enabled: true,
+      address: "127.0.0.1",
+      terminalHash: null,
+      updatedAt: null,
+    });
+    networkReads = 0;
+    await Promise.all(
+      Array.from({ length: 12 }, () => readRealtimeOrderingNetwork()),
+    );
+    assert.equal(networkReads, 1);
+    setup(liveSession, settingRows);
+    assert.equal(await access.check(), null);
+    networkValue = JSON.stringify({
+      enabled: true,
+      address: "192.168.1.40",
+      terminalHash: null,
+      updatedAt: null,
+    });
+    invalidateRealtimeOrderingNetwork();
+    setup();
+    assert.equal((await access.check())?.code, "ORDERING_NETWORK_REQUIRED");
+    assert.equal(networkReads, 2);
+  } finally {
+    networkValue = undefined;
+    invalidateRealtimeOrderingNetwork();
+  }
+});
 
 test("customer refreshes use a separate budget and expose Retry-After across origins", async () => {
   const origin = "http://localhost:3000";
   const check = async (path: string, method = "GET") => {
-    const result = await fetch(`${base}/budget${path}`, { method, headers: { Origin: origin } });
+    const result = await fetch(`${base}/budget${path}`, {
+      method,
+      headers: { Origin: origin },
+    });
     assert.equal(result.status, 204);
     assert.equal(result.headers.get("access-control-allow-origin"), origin);
-    assert.equal(result.headers.get("access-control-expose-headers"), "Retry-After");
+    assert.equal(
+      result.headers.get("access-control-expose-headers"),
+      "Retry-After",
+    );
     return {
       limit: Number(result.headers.get("ratelimit-limit")),
       remaining: Number(result.headers.get("ratelimit-remaining")),
@@ -116,41 +200,77 @@ test("customer refreshes use a separate budget and expose Retry-After across ori
   const checkout = await check("/tables/orders", "POST");
   assert.equal(checkout.limit, 600);
   for (const [path, method] of [
-    ["/menu", "GET"], ["/store/status", "GET"], ["/tables/cart", "GET"],
-    ["/tables/orders?sessionId=test", "GET"], ["/tables/resolve", "POST"],
-  ]) assert.equal((await check(path, method)).limit, 12_000);
+    ["/menu", "GET"],
+    ["/store/status", "GET"],
+    ["/tables/cart", "GET"],
+    ["/tables/orders?sessionId=test", "GET"],
+    ["/tables/resolve", "POST"],
+  ])
+    assert.equal((await check(path, method)).limit, 12_000);
   const staff = await check("/staff/orders");
   assert.equal(staff.remaining, checkout.remaining - 1);
   assert.equal((await check("/tables/cart", "DELETE")).limit, 600);
-  assert.equal((await check("/tables/orders/example/cancel", "POST")).limit, 600);
+  assert.equal(
+    (await check("/tables/orders/example/cancel", "POST")).limit,
+    600,
+  );
 });
 
 async function request(path: string, staff = false) {
-  const response = await fetch(base + path, { headers: staff
-    ? { authorization: `Bearer ${signAccessToken(1, "staff")}` }
-    : { "x-table-token": token }, signal: AbortSignal.timeout(3_000) });
+  const response = await fetch(base + path, {
+    headers: staff
+      ? { authorization: `Bearer ${signAccessToken(1, "staff")}` }
+      : { "x-table-token": token },
+    signal: AbortSignal.timeout(3_000),
+  });
   const body = await response.text();
   assert.equal(replies.length, 0, body);
-  return { status: response.status, data: body && response.headers.get("content-type")?.includes("application/json") ? JSON.parse(body) : body };
+  return {
+    status: response.status,
+    data:
+      body && response.headers.get("content-type")?.includes("application/json")
+        ? JSON.parse(body)
+        : body,
+  };
 }
 
 test("customer polling is session-bound and never accepts a new visit implicitly", async () => {
   setup(table, session, cart);
-  const result = await request(`/tables/realtime/changes?sessionId=${otherSession}`);
+  const result = await request(
+    `/tables/realtime/changes?sessionId=${otherSession}`,
+  );
   assert.equal(result.status, 409);
   assert.equal(result.data.code, "TABLE_SESSION_REQUIRED");
   setup(table, session, cart);
   assert.equal((await request("/tables/realtime/changes")).status, 400);
   setup([]);
-  assert.equal((await request(`/tables/realtime/events?sessionId=${sessionId}`)).status, 404);
+  assert.equal(
+    (await request(`/tables/realtime/events?sessionId=${sessionId}`)).status,
+    404,
+  );
 });
 
 test("polling returns revisions, then 204 for unchanged state with fresh authorization", async () => {
-  setup(table, session, cart, liveSession, settingRows, [resources], liveSession, settingRows);
-  const first = await request(`/tables/realtime/changes?sessionId=${sessionId}`);
+  setup(
+    table,
+    session,
+    cart,
+    liveSession,
+    settingRows,
+    [resources],
+    liveSession,
+    settingRows,
+  );
+  const first = await request(
+    `/tables/realtime/changes?sessionId=${sessionId}`,
+  );
   assert.equal(first.status, 200);
   assert.deepEqual(first.data.data.resources, resources);
-  assert.deepEqual(first.data.data.scope, { kind: "table", tableId: 1, sessionId });
+  assert.deepEqual(first.data.data.scope, {
+    kind: "table",
+    tableId: 1,
+    sessionId,
+  });
   const revision = first.data.data.revision;
   assert.match(revision, /^[a-f0-9]{64}$/);
   const query = queries.find((query) => query.text.includes("string_agg"))!;
@@ -158,8 +278,24 @@ test("polling returns revisions, then 204 for unchanged state with fresh authori
   assert.ok(!query.params.includes(otherSession));
   assert.ok(!JSON.stringify(first.data).includes(token));
 
-  setup(table, session, cart, liveSession, settingRows, [resources], liveSession, settingRows);
-  assert.equal((await request(`/tables/realtime/changes?sessionId=${sessionId}&since=${revision}`)).status, 204);
+  setup(
+    table,
+    session,
+    cart,
+    liveSession,
+    settingRows,
+    [resources],
+    liveSession,
+    settingRows,
+  );
+  assert.equal(
+    (
+      await request(
+        `/tables/realtime/changes?sessionId=${sessionId}&since=${revision}`,
+      )
+    ).status,
+    204,
+  );
 });
 
 test("staff polling requires a current active account and omits cart scope", async () => {
@@ -174,7 +310,10 @@ test("staff polling requires a current active account and omits cart scope", asy
   assert.equal(result.status, 200);
   assert.equal(result.data.data.resources.cart, undefined);
   setup(account);
-  assert.equal((await request("/staff/realtime/changes?since=invalid", true)).status, 400);
+  assert.equal(
+    (await request("/staff/realtime/changes?since=invalid", true)).status,
+    400,
+  );
 });
 
 test("active stream guards reject expired tokens, deactivated QR, closed and idle sessions", async () => {
@@ -184,22 +323,40 @@ test("active stream guards reject expired tokens, deactivated QR, closed and idl
   try {
     const expiring = signAccessToken(1, "staff");
     mock.timers.tick(11 * 60_000);
-    assert.equal((await staffAccess(1, expiring).check())?.code, "AUTH_REQUIRED");
+    assert.equal(
+      (await staffAccess(1, expiring).check())?.code,
+      "AUTH_REQUIRED",
+    );
     assert.equal(queries.length, 0);
-  } finally { mock.timers.reset(); }
+  } finally {
+    mock.timers.reset();
+  }
   setup([[false, "staff"]]);
-  assert.equal((await staffAccess(1, signAccessToken(1, "staff")).check())?.status, 401);
+  assert.equal(
+    (await staffAccess(1, signAccessToken(1, "staff")).check())?.status,
+    401,
+  );
   setup([[false, token, "pending", now, cartId]]);
-  assert.equal((await tableAccess(1, sessionId, token).check())?.code, "INVALID_TABLE_QR");
+  assert.equal(
+    (await tableAccess(1, sessionId, token).check())?.code,
+    "INVALID_TABLE_QR",
+  );
   setup([[true, token, "closed", now, null]]);
-  assert.equal((await tableAccess(1, sessionId, token).check())?.code, "TABLE_SESSION_REQUIRED");
+  assert.equal(
+    (await tableAccess(1, sessionId, token).check())?.code,
+    "TABLE_SESSION_REQUIRED",
+  );
   setup([[true, token, "open", new Date(0), cartId]], settingRows);
   assert.equal((await tableAccess(1, sessionId, token).check())?.status, 409);
   assert.equal(replies.length, 0);
 });
 
 test("revision fingerprints are independent of object key order and change with resources", async () => {
-  setup([resources], [Object.fromEntries(Object.entries(resources).reverse())], [{ ...resources, orders: "new" }]);
+  setup(
+    [resources],
+    [Object.fromEntries(Object.entries(resources).reverse())],
+    [{ ...resources, orders: "new" }],
+  );
   const a = await readRevisions({ kind: "staff" });
   const b = await readRevisions({ kind: "staff" });
   const c = await readRevisions({ kind: "staff" });
@@ -210,11 +367,20 @@ test("revision fingerprints are independent of object key order and change with 
 test("shared hub coalesces readers and detaches listeners during an in-flight read", async () => {
   let resolve!: (state: RevisionState) => void;
   let reads = 0;
-  const hub = new RealtimeHub(() => { reads++; return new Promise((done) => { resolve = done; }); });
+  const hub = new RealtimeHub(() => {
+    reads++;
+    return new Promise((done) => {
+      resolve = done;
+    });
+  });
   let staleDeliveries = 0;
   let got!: () => void;
-  const delivered = new Promise<void>((done) => { got = done; });
-  const first = hub.subscribe({ kind: "staff" }, () => { staleDeliveries++; });
+  const delivered = new Promise<void>((done) => {
+    got = done;
+  });
+  const first = hub.subscribe({ kind: "staff" }, () => {
+    staleDeliveries++;
+  });
   const second = hub.subscribe({ kind: "staff" }, () => got());
   assert.equal(reads, 1);
   first();
@@ -225,80 +391,123 @@ test("shared hub coalesces readers and detaches listeners during an in-flight re
   hub.close();
 });
 
-test("SSE emits sync, scoped change and access-ended, then closes", { timeout: 3_000 }, async () => {
-  streamState = state;
-  streamFailure = null;
-  sourceFails = false;
-  const response = await fetch(base + "/test/events", { signal: AbortSignal.timeout(2_500) });
-  assert.match(response.headers.get("content-type")!, /^text\/event-stream/);
-  assert.equal(response.headers.get("x-accel-buffering"), "no");
-  assert.match(response.headers.get("cache-control")!, /no-transform/);
-  const messages = sseMessages(response.body!);
-  assert.equal((await messages.next()).value?.event, "sync");
-  streamState = { revision: "b".repeat(64), resources: { ...resources, orders: "new" } };
-  const change = (await messages.next()).value!;
-  assert.equal(change.event, "change");
-  assert.deepEqual(JSON.parse(change.data).changed, ["orders"]);
-  streamFailure = { status: 401, code: "AUTH_REQUIRED", message: "Expired" };
-  assert.equal((await messages.next()).value?.event, "access-ended");
-  assert.equal((await messages.next()).done, true);
-  streamFailure = null;
-});
+test(
+  "SSE emits sync, scoped change and access-ended, then closes",
+  { timeout: 3_000 },
+  async () => {
+    streamState = state;
+    streamFailure = null;
+    sourceFails = false;
+    const response = await fetch(base + "/test/events", {
+      signal: AbortSignal.timeout(2_500),
+    });
+    assert.match(response.headers.get("content-type")!, /^text\/event-stream/);
+    assert.equal(response.headers.get("x-accel-buffering"), "no");
+    assert.match(response.headers.get("cache-control")!, /no-transform/);
+    const messages = sseMessages(response.body!);
+    assert.equal((await messages.next()).value?.event, "sync");
+    streamState = {
+      revision: "b".repeat(64),
+      resources: { ...resources, orders: "new" },
+    };
+    const change = (await messages.next()).value!;
+    assert.equal(change.event, "change");
+    assert.deepEqual(JSON.parse(change.data).changed, ["orders"]);
+    streamFailure = { status: 401, code: "AUTH_REQUIRED", message: "Expired" };
+    assert.equal((await messages.next()).value?.event, "access-ended");
+    assert.equal((await messages.next()).done, true);
+    streamFailure = null;
+  },
+);
 
-test("stream failure instructs fallback and shutdown ends long-lived responses", { timeout: 3_000 }, async () => {
-  sourceFails = true;
-  let response = await fetch(base + "/test/events", { signal: AbortSignal.timeout(2_500) });
-  let messages = sseMessages(response.body!);
-  assert.equal((await messages.next()).value?.event, "unavailable");
-  assert.equal((await messages.next()).done, true);
-  sourceFails = false;
-  response = await fetch(base + "/test/events", { signal: AbortSignal.timeout(2_500) });
-  messages = sseMessages(response.body!);
-  assert.equal((await messages.next()).value?.event, "sync");
-  closeRealtimeStreams();
-  assert.equal((await messages.next()).value?.event, "reconnect");
-  assert.equal((await messages.next()).done, true);
-});
+test(
+  "stream failure instructs fallback and shutdown ends long-lived responses",
+  { timeout: 3_000 },
+  async () => {
+    sourceFails = true;
+    let response = await fetch(base + "/test/events", {
+      signal: AbortSignal.timeout(2_500),
+    });
+    let messages = sseMessages(response.body!);
+    assert.equal((await messages.next()).value?.event, "unavailable");
+    assert.equal((await messages.next()).done, true);
+    sourceFails = false;
+    response = await fetch(base + "/test/events", {
+      signal: AbortSignal.timeout(2_500),
+    });
+    messages = sseMessages(response.body!);
+    assert.equal((await messages.next()).value?.event, "sync");
+    closeRealtimeStreams();
+    assert.equal((await messages.next()).value?.event, "reconnect");
+    assert.equal((await messages.next()).done, true);
+  },
+);
 
 test("slow readers are disconnected before subscribing to a source", () => {
   let reads = 0;
-  const source = new RealtimeHub(async () => { reads++; return state; });
+  const source = new RealtimeHub(async () => {
+    reads++;
+    return state;
+  });
   let destroyed = false;
   const emitter = new EventEmitter();
   const response = Object.assign(emitter, {
-    status() { return this; }, set() { return this; }, flushHeaders() {},
+    status() {
+      return this;
+    },
+    set() {
+      return this;
+    },
+    flushHeaders() {},
     write: () => false,
-    destroy() { destroyed = true; emitter.emit("close"); },
+    destroy() {
+      destroyed = true;
+      emitter.emit("close");
+    },
   }) as unknown as Response;
-  openRealtimeStream(response, { key: "slow", scope: { kind: "staff" }, check: async () => null }, source);
+  openRealtimeStream(
+    response,
+    { key: "slow", scope: { kind: "staff" }, check: async () => null },
+    source,
+  );
   assert.equal(destroyed, true);
   assert.equal(reads, 0);
   source.close();
 });
 
-test("browser helper falls back to polling, applies state, and stops cleanly", { timeout: 3_000 }, async () => {
-  fallbackRequests = [];
-  const abort = new AbortController();
-  const transports: string[] = [];
-  let applied = false;
-  const watcher = watchRealtime({
-    url: base + "/fallback", headers: () => ({ "x-table-token": token }), signal: abort.signal,
-    onTransport: (transport) => { transports.push(transport); },
-    onChange(next, changed) {
-      assert.equal(next.revision, state.revision);
-      assert.deepEqual(changed.sort(), Object.keys(resources).sort());
-      applied = true;
-      abort.abort();
-    },
-  });
-  await watcher.done;
-  assert.equal(applied, true);
-  assert.deepEqual(fallbackRequests, ["events", "changes"]);
-  assert.deepEqual(transports, ["polling"]);
-});
+test(
+  "browser helper falls back to polling, applies state, and stops cleanly",
+  { timeout: 3_000 },
+  async () => {
+    fallbackRequests = [];
+    const abort = new AbortController();
+    const transports: string[] = [];
+    let applied = false;
+    const watcher = watchRealtime({
+      url: base + "/fallback",
+      headers: () => ({ "x-table-token": token }),
+      signal: abort.signal,
+      onTransport: (transport) => {
+        transports.push(transport);
+      },
+      onChange(next, changed) {
+        assert.equal(next.revision, state.revision);
+        assert.deepEqual(changed.sort(), Object.keys(resources).sort());
+        applied = true;
+        abort.abort();
+      },
+    });
+    await watcher.done;
+    assert.equal(applied, true);
+    assert.deepEqual(fallbackRequests, ["events", "changes"]);
+    assert.deepEqual(transports, ["polling"]);
+  },
+);
 
 test("SSE parser handles byte-split UTF-8, CRLF, comments and multiline JSON", async () => {
-  const bytes = new TextEncoder().encode(': heartbeat\r\nevent: change\r\ndata: {"name":"₱",\r\ndata: "ok":true}\r\n\r\n');
+  const bytes = new TextEncoder().encode(
+    ': heartbeat\r\nevent: change\r\ndata: {"name":"₱",\r\ndata: "ok":true}\r\n\r\n',
+  );
   const body = new ReadableStream<Uint8Array>({
     start(controller) {
       for (const byte of bytes) controller.enqueue(new Uint8Array([byte]));

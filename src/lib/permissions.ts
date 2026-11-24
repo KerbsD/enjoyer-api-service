@@ -43,6 +43,7 @@ const MANAGER_PERMISSIONS = [
 // What Owner adds on top of Manager.
 const OWNER_PERMISSIONS = [
   "account:manage", // create, change role, deactivate accounts
+  "ordering-network:manage",
 ] as const;
 
 export type Permission =

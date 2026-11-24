@@ -2,6 +2,7 @@ import { test, mock, before, after } from "node:test";
 import assert from "node:assert/strict";
 import bcrypt from "bcrypt";
 import type { RequestHandler } from "express";
+import type { Request } from "express";
 
 // Test the production Express app and real bcrypt/JWT/session logic. Database
 // responses are scripted; no real credentials, database or email service is used.
@@ -42,7 +43,11 @@ const chain = (rows: Row[]) => ({
 function mutation(operation: string, values: Row) {
   writes.push({ operation, values });
   const rows = returns.shift() ?? [];
-  return { ...chain(rows), returning: async () => rows };
+  return {
+    ...chain(rows),
+    onConflictDoNothing: async () => {},
+    returning: async () => rows,
+  };
 }
 const db = {
   select() {
@@ -126,6 +131,9 @@ mock.module("../src/lib/authLimiter.ts", {
   ),
 });
 const { default: app } = await import("../src/app.ts");
+const { requestOrderingAddress } =
+  await import("../src/lib/orderingNetwork.ts");
+const { env: testEnv } = await import("../src/configs/env.ts");
 const { signAccessToken, newToken, sha256, verifyAccessToken } =
   await import("../src/lib/tokens.ts");
 const { createSession, rotateSession, revokeSessionFamily } =
@@ -576,11 +584,228 @@ test("production app mounts public table resolution and protects table managemen
   setup([[{ id: 1, name: "Table 1", orderLimit: 5, active: true }]]);
   const resolved = await request("POST", "/tables/resolve", { token });
   assert.equal(resolved.status, 200);
-  assert.deepEqual(resolved.data.data, { id: 1, name: "Table 1", orderLimit: 5 });
+  assert.deepEqual(resolved.data.data, {
+    id: 1,
+    name: "Table 1",
+    orderLimit: 5,
+  });
   setup();
   assert.equal((await request("GET", "/admin/tables")).status, 401);
   setup([[manager], [], [{ total: 0 }]]);
-  assert.equal((await request("GET", "/admin/tables", undefined, "manager")).status, 200);
+  assert.equal(
+    (await request("GET", "/admin/tables", undefined, "manager")).status,
+    200,
+  );
   setup([[manager], [], [{ total: 0 }]]);
-  assert.equal((await request("GET", "/staff/tables", undefined, "manager")).status, 200);
+  assert.equal(
+    (await request("GET", "/staff/tables", undefined, "manager")).status,
+    200,
+  );
+});
+
+const orderingState = (
+  address: string,
+  terminalHash: string | null = null,
+) => ({
+  value: JSON.stringify({
+    enabled: true,
+    address,
+    terminalHash,
+    updatedAt: null,
+  }),
+});
+
+test("production ordering IPs require an explicit and verified network source", () => {
+  const previous = { ...testEnv };
+  const simulatedRequest = (overrides: object = {}) =>
+    ({
+      socket: { remoteAddress: "192.0.2.1" },
+      ip: "8.8.8.8",
+      ips: ["8.8.8.8"],
+      app: { get: () => (address: string) => address === "192.0.2.1" },
+      get: () => undefined,
+      ...overrides,
+    }) as unknown as Request;
+  try {
+    Object.assign(testEnv, {
+      NODE_ENV: "production",
+      ORDERING_NETWORK_IP_SOURCE: undefined,
+    });
+    assert.equal(requestOrderingAddress(simulatedRequest()), null);
+
+    Object.assign(testEnv, {
+      ORDERING_NETWORK_IP_SOURCE: "trusted-proxy",
+      TRUST_PROXY_CIDRS: ["192.0.2.1/32"],
+    });
+    assert.equal(requestOrderingAddress(simulatedRequest()), "8.8.8.8");
+    assert.equal(requestOrderingAddress(simulatedRequest({ ips: [] })), null);
+    assert.equal(
+      requestOrderingAddress(
+        simulatedRequest({ socket: { remoteAddress: "192.0.2.2" } }),
+      ),
+      null,
+    );
+    assert.equal(
+      requestOrderingAddress(simulatedRequest({ ip: "192.0.2.1" })),
+      null,
+    );
+
+    Object.assign(testEnv, {
+      ORDERING_NETWORK_IP_SOURCE: "direct",
+      TRUST_PROXY_CIDRS: undefined,
+    });
+    assert.equal(
+      requestOrderingAddress(
+        simulatedRequest({ socket: { remoteAddress: "::ffff:8.8.8.8" } }),
+      ),
+      "8.8.8.8",
+    );
+    assert.equal(
+      requestOrderingAddress(simulatedRequest({ get: () => "forwarded" })),
+      null,
+    );
+  } finally {
+    Object.assign(testEnv, previous, {
+      ORDERING_NETWORK_IP_SOURCE: undefined,
+      TRUST_PROXY_CIDRS: undefined,
+    });
+  }
+});
+
+test("off-network customers can browse but cannot open, resume, read or write a table visit", async () => {
+  setup([[]]);
+  assert.equal((await request("GET", "/menu")).status, 200);
+  setup([[{ id: 1, name: "Test table", orderLimit: 5, active: true }]]);
+  assert.equal(
+    (await request("POST", "/tables/resolve", { token })).status,
+    200,
+  );
+  for (const [method, path] of [
+    ["POST", "/tables/open"],
+    ["POST", "/tables/resume"],
+    ["GET", "/tables/cart"],
+    ["POST", "/tables/cart/items"],
+    ["GET", "/tables/orders"],
+    ["POST", "/tables/orders"],
+    ["POST", "/tables/orders/test/cancel"],
+  ]) {
+    setup([[orderingState("192.168.1.40")]]);
+    const result = await request(
+      method,
+      path,
+      method === "POST" ? { token } : undefined,
+    );
+    assert.equal(result.status, 403, path);
+    assert.equal(result.data.code, "ORDERING_NETWORK_REQUIRED");
+    assert.equal(writes.length, 0);
+  }
+  setup([[orderingState("127.0.0.1")]]);
+  const local = await request("POST", "/tables/open", {});
+  assert.equal(local.status, 400); // Reached ordinary route validation.
+});
+
+test("only the owner can enroll a terminal and only its credential can update the IP", async () => {
+  const path = "/admin/ordering-network";
+  setup([[manager]]);
+  assert.equal(
+    (
+      await request(
+        "POST",
+        `${path}/terminal`,
+        { expectedAddress: "127.0.0.1" },
+        "manager",
+      )
+    ).status,
+    403,
+  );
+  setup([[owner]]);
+  assert.equal(
+    (
+      await request(
+        "POST",
+        `${path}/terminal`,
+        { expectedAddress: "192.168.1.40" },
+        "owner",
+      )
+    ).status,
+    409,
+  );
+  assert.equal(writes.length, 0);
+  setup([
+    [owner],
+    [
+      {
+        value: JSON.stringify({
+          enabled: false,
+          address: null,
+          terminalHash: null,
+          updatedAt: null,
+        }),
+      },
+    ],
+  ]);
+  const enrolled = await request(
+    "POST",
+    `${path}/terminal`,
+    { expectedAddress: "127.0.0.1" },
+    "owner",
+  );
+  assert.equal(enrolled.status, 200);
+  assert.equal(enrolled.data.data.address, "127.0.0.1");
+  assert.equal("terminalHash" in enrolled.data.data, false);
+  assert.match(enrolled.cookie!, /HttpOnly/i);
+  const credential = enrolled.cookie!.split(";")[0];
+  const rawToken = credential.split("=")[1];
+  const { terminalHash } = JSON.parse(String(writes.at(-1)?.values.value));
+  assert.equal(terminalHash, sha256(rawToken));
+
+  setup([[manager]]);
+  const ordinary = await request("POST", `${path}/sync`, undefined, "manager");
+  assert.deepEqual(ordinary.data.data, { enrolled: false, changed: false });
+  assert.equal(writes.length, 0);
+
+  const sync = async (row: Row) => {
+    setup([[manager], [row]]);
+    const res = await fetch(`${base}${path}/sync`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${signAccessToken(2, "manager")}`,
+        cookie: credential,
+      },
+    });
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get("set-cookie"), null);
+    return (await res.json()).data;
+  };
+  assert.deepEqual(await sync(orderingState("192.168.1.40", terminalHash)), {
+    enrolled: true,
+    changed: true,
+  });
+  assert.equal(JSON.parse(String(writes[0].values.value)).address, "127.0.0.1");
+
+  setup([[owner], [orderingState("127.0.0.1", terminalHash)]]);
+  const revoked = await request(
+    "DELETE",
+    `${path}/terminal`,
+    undefined,
+    "owner",
+  );
+  assert.equal(revoked.data.data.enabled, true);
+  assert.equal(revoked.data.data.address, "127.0.0.1");
+  assert.equal(revoked.data.data.terminalEnrolled, false);
+
+  setup([[owner], [orderingState("127.0.0.1", terminalHash)]]);
+  const override = await request(
+    "PATCH",
+    path,
+    { action: "override", address: "192.168.1.40" },
+    "owner",
+  );
+  assert.equal(override.data.data.enabled, true);
+  assert.equal(override.data.data.terminalEnrolled, false);
+  assert.deepEqual(await sync(orderingState("192.168.1.40")), {
+    enrolled: false,
+    changed: false,
+  });
+  assert.equal(writes.length, 0);
 });

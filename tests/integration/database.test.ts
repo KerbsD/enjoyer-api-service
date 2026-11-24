@@ -162,96 +162,211 @@ test(
     }
     const fingerprint = { ip: "192.0.2.1", userAgent: "IntegrationBrowser" };
 
-    await t.test("concurrent checkout retries create one order visible to staff", async () => {
-      const { tableSessions, carts, cartItems } = await import("../../src/db/schema.ts");
-      const { placeOrder } = await import("../../src/controllers/orders/public.ts");
-      const { loadCartView } = await import("../../src/lib/cart.ts");
-      const { listStaffOrders } = await import("../../src/controllers/orders/staff.ts");
-      const [table] = await db.insert(shopTables).values({
-        name: "Checkout integration table", qrToken: newToken(),
-      }).returning();
-      const [session] = await db.insert(tableSessions).values({ tableId: table.id }).returning();
-      const [cart] = await db.insert(carts).values({ tableSessionId: session.id }).returning();
-      const [category] = await db.insert(categories).values({ name: "Checkout category" }).returning();
-      const [item] = await db.insert(menuItems).values({
-        categoryId: category.id, name: "Checkout latte", price: "120.00",
-      }).returning();
-      await db.insert(cartItems).values({
-        cartId: cart.id, menuItemId: item.id, quantity: 2, note: "less ice",
-      });
+    await t.test(
+      "concurrent checkout retries create one order visible to staff",
+      async () => {
+        const { tableSessions, carts, cartItems } =
+          await import("../../src/db/schema.ts");
+        const { placeOrder } =
+          await import("../../src/controllers/orders/public.ts");
+        const { loadCartView } = await import("../../src/lib/cart.ts");
+        const { listStaffOrders } =
+          await import("../../src/controllers/orders/staff.ts");
+        const [table] = await db
+          .insert(shopTables)
+          .values({
+            name: "Checkout integration table",
+            qrToken: newToken(),
+          })
+          .returning();
+        const [session] = await db
+          .insert(tableSessions)
+          .values({ tableId: table.id })
+          .returning();
+        const [cart] = await db
+          .insert(carts)
+          .values({ tableSessionId: session.id })
+          .returning();
+        const [category] = await db
+          .insert(categories)
+          .values({ name: "Checkout category" })
+          .returning();
+        const [item] = await db
+          .insert(menuItems)
+          .values({
+            categoryId: category.id,
+            name: "Checkout latte",
+            price: "120.00",
+          })
+          .returning();
+        await db.insert(cartItems).values({
+          cartId: cart.id,
+          menuItemId: item.id,
+          quantity: 2,
+          note: "less ice",
+        });
 
-      const reviewed = await loadCartView(cart.id);
-      const body = {
-        cartId: cart.id, version: cart.version, requestId: randomUUID(), total: reviewed.totals.total,
-        reviewFingerprint: reviewed.reviewFingerprint,
-      };
-      const attempts = [response(), response()];
-      await Promise.all(attempts.map(async ({ res }) => {
-        res.locals = { tableSession: { table, session, cart } };
-        await placeOrder({ body } as Request, res);
-      }));
-      assert.deepEqual(attempts.map(({ result }) => result.status).sort(), [200, 201]);
-      for (const { result } of attempts) {
-        assert.equal(result.body.data.order.id, body.requestId);
-        assert.deepEqual(result.body.data.cart.items, []);
-        assert.equal(result.body.data.cart.version, cart.version + 1);
-      }
+        const reviewed = await loadCartView(cart.id);
+        const body = {
+          cartId: cart.id,
+          version: cart.version,
+          requestId: randomUUID(),
+          total: reviewed.totals.total,
+          reviewFingerprint: reviewed.reviewFingerprint,
+          customerName: "Alex",
+        };
+        const attempts = [response(), response()];
+        await Promise.all(
+          attempts.map(async ({ res }) => {
+            res.locals = { tableSession: { table, session, cart } };
+            await placeOrder({ body } as Request, res);
+          }),
+        );
+        assert.deepEqual(
+          attempts.map(({ result }) => result.status).sort(),
+          [200, 201],
+        );
+        for (const { result } of attempts) {
+          assert.equal(result.body.data.order.id, body.requestId);
+          assert.deepEqual(result.body.data.cart.items, []);
+          assert.equal(result.body.data.cart.version, cart.version + 1);
+        }
 
-      const board = response();
-      board.res.locals = { query: { tableId: table.id, activeSessionOnly: true, limit: 20, offset: 0 } };
-      await listStaffOrders({} as Request, board.res);
-      assert.equal(board.result.body.data.length, 1);
-      const [order] = board.result.body.data;
-      assert.equal(order.id, body.requestId);
-      assert.equal(order.status, "pending_confirmation");
-      assert.equal(order.items[0].name, "Checkout latte");
-      assert.equal(order.items[0].note, "less ice");
-      assert.equal(order.items[0].lineTotal, "240.00");
-    });
+        const board = response();
+        board.res.locals = {
+          query: {
+            tableId: table.id,
+            activeSessionOnly: true,
+            limit: 20,
+            offset: 0,
+          },
+        };
+        await listStaffOrders({} as Request, board.res);
+        assert.equal(board.result.body.data.length, 1);
+        const [order] = board.result.body.data;
+        assert.equal(order.id, body.requestId);
+        assert.equal(order.customerName, "Alex");
+        assert.equal(order.status, "pending_confirmation");
+        assert.equal(order.items[0].name, "Checkout latte");
+        assert.equal(order.items[0].note, "less ice");
+        assert.equal(order.items[0].lineTotal, "240.00");
+      },
+    );
 
-    await t.test("realtime sees committed changes across connections and isolates table sessions", async () => {
-      const { readRevisions } = await import("../../src/lib/realtime/revisions.ts");
-      const { tableSessions, carts, orders } = await import("../../src/db/schema.ts");
-      const [tableA, tableB] = await db.insert(shopTables).values([
-        { name: "Realtime A", qrToken: newToken() },
-        { name: "Realtime B", qrToken: newToken() },
-      ]).returning();
-      const [sessionA] = await db.insert(tableSessions).values({ tableId: tableA.id }).returning();
-      const [sessionB] = await db.insert(tableSessions).values({ tableId: tableB.id }).returning();
-      const [cartA] = await db.insert(carts).values({ tableSessionId: sessionA.id }).returning();
-      await db.insert(carts).values({ tableSessionId: sessionB.id });
-      const scopeA = { kind: "table" as const, tableId: tableA.id, sessionId: sessionA.id };
-      const scopeB = { kind: "table" as const, tableId: tableB.id, sessionId: sessionB.id };
-      const beforeA = await readRevisions(scopeA);
-      const beforeB = await readRevisions(scopeB);
-      const beforeStaff = await readRevisions({ kind: "staff" });
-      const writer = await pool.connect();
-      try {
-        await writer.query("begin");
-        await writer.query('update carts set version = version + 1 where id = $1', [cartA.id]);
-        assert.equal((await readRevisions(scopeA)).resources.cart, beforeA.resources.cart);
-        await writer.query("rollback");
-        assert.equal((await readRevisions(scopeA)).resources.cart, beforeA.resources.cart);
-        await writer.query("begin");
-        await writer.query('update carts set version = version + 1 where id = $1', [cartA.id]);
-        await writer.query("commit");
-      } finally { await writer.query("rollback"); writer.release(); }
-      assert.notEqual((await readRevisions(scopeA)).resources.cart, beforeA.resources.cart);
-      assert.equal((await readRevisions(scopeB)).resources.cart, beforeB.resources.cart);
+    await t.test(
+      "realtime sees committed changes across connections and isolates table sessions",
+      async () => {
+        const { readRevisions } =
+          await import("../../src/lib/realtime/revisions.ts");
+        const { tableSessions, carts, orders } =
+          await import("../../src/db/schema.ts");
+        const [tableA, tableB] = await db
+          .insert(shopTables)
+          .values([
+            { name: "Realtime A", qrToken: newToken() },
+            { name: "Realtime B", qrToken: newToken() },
+          ])
+          .returning();
+        const [sessionA] = await db
+          .insert(tableSessions)
+          .values({ tableId: tableA.id })
+          .returning();
+        const [sessionB] = await db
+          .insert(tableSessions)
+          .values({ tableId: tableB.id })
+          .returning();
+        const [cartA] = await db
+          .insert(carts)
+          .values({ tableSessionId: sessionA.id })
+          .returning();
+        await db.insert(carts).values({ tableSessionId: sessionB.id });
+        const scopeA = {
+          kind: "table" as const,
+          tableId: tableA.id,
+          sessionId: sessionA.id,
+        };
+        const scopeB = {
+          kind: "table" as const,
+          tableId: tableB.id,
+          sessionId: sessionB.id,
+        };
+        const beforeA = await readRevisions(scopeA);
+        const beforeB = await readRevisions(scopeB);
+        const beforeStaff = await readRevisions({ kind: "staff" });
+        const writer = await pool.connect();
+        try {
+          await writer.query("begin");
+          await writer.query(
+            "update carts set version = version + 1 where id = $1",
+            [cartA.id],
+          );
+          assert.equal(
+            (await readRevisions(scopeA)).resources.cart,
+            beforeA.resources.cart,
+          );
+          await writer.query("rollback");
+          assert.equal(
+            (await readRevisions(scopeA)).resources.cart,
+            beforeA.resources.cart,
+          );
+          await writer.query("begin");
+          await writer.query(
+            "update carts set version = version + 1 where id = $1",
+            [cartA.id],
+          );
+          await writer.query("commit");
+        } finally {
+          await writer.query("rollback");
+          writer.release();
+        }
+        assert.notEqual(
+          (await readRevisions(scopeA)).resources.cart,
+          beforeA.resources.cart,
+        );
+        assert.equal(
+          (await readRevisions(scopeB)).resources.cart,
+          beforeB.resources.cart,
+        );
 
-      const [order] = await db.insert(orders).values({
-        orderNumber: "20261112-001", tableId: tableA.id, tableSessionId: sessionA.id,
-        status: "pending_confirmation", subtotal: "100.00", total: "100.00",
-      }).returning();
-      const placed = await readRevisions(scopeA);
-      assert.notEqual(placed.resources.orders, beforeA.resources.orders);
-      assert.equal((await readRevisions(scopeB)).resources.orders, beforeB.resources.orders);
-      assert.notEqual((await readRevisions({ kind: "staff" })).resources.orders, beforeStaff.resources.orders);
-      await db.update(orders).set({ status: "rejected", rejectionReason: "expired" }).where(eq(orders.id, order.id));
-      assert.notEqual((await readRevisions(scopeA)).resources.orders, placed.resources.orders);
-      await db.update(tableSessions).set({ status: "closed", closedAt: new Date(), closedBy: "timeout" }).where(eq(tableSessions.id, sessionA.id));
-      assert.notEqual((await readRevisions(scopeA)).resources.tables, beforeA.resources.tables);
-    });
+        const [order] = await db
+          .insert(orders)
+          .values({
+            orderNumber: "20261112-001",
+            tableId: tableA.id,
+            tableSessionId: sessionA.id,
+            status: "pending_confirmation",
+            subtotal: "100.00",
+            total: "100.00",
+          })
+          .returning();
+        const placed = await readRevisions(scopeA);
+        assert.notEqual(placed.resources.orders, beforeA.resources.orders);
+        assert.equal(
+          (await readRevisions(scopeB)).resources.orders,
+          beforeB.resources.orders,
+        );
+        assert.notEqual(
+          (await readRevisions({ kind: "staff" })).resources.orders,
+          beforeStaff.resources.orders,
+        );
+        await db
+          .update(orders)
+          .set({ status: "rejected", rejectionReason: "expired" })
+          .where(eq(orders.id, order.id));
+        assert.notEqual(
+          (await readRevisions(scopeA)).resources.orders,
+          placed.resources.orders,
+        );
+        await db
+          .update(tableSessions)
+          .set({ status: "closed", closedAt: new Date(), closedBy: "timeout" })
+          .where(eq(tableSessions.id, sessionA.id));
+        assert.notEqual(
+          (await readRevisions(scopeA)).resources.tables,
+          beforeA.resources.tables,
+        );
+      },
+    );
 
     await t.test(
       "simultaneous refreshes after a network change keep both successors usable",
@@ -492,13 +607,11 @@ test(
         }
         // Test a real DB constraint, not just the HTTP validator.
         await assert.rejects(async () => {
-          await db
-            .insert(shopTables)
-            .values({
-              name: "Invalid limit",
-              qrToken: newToken(),
-              orderLimit: 0,
-            });
+          await db.insert(shopTables).values({
+            name: "Invalid limit",
+            qrToken: newToken(),
+            orderLimit: 0,
+          });
         });
       },
     );

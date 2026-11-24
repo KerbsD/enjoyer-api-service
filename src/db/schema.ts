@@ -660,6 +660,8 @@ export const orders = pgTable(
       .notNull()
       .references(() => shopTables.id, { onDelete: "restrict" }),
     status: orderStatus("status").notNull(),
+    // Null is reserved for orders created before the checkout name requirement.
+    customerName: text("customer_name"),
     // Integer-centavo math is done in the API; these exact decimals are the
     // PHP amounts shown to the customer and stored for reporting.
     subtotal: numeric("subtotal", { precision: 10, scale: 2 }).notNull(),
@@ -798,7 +800,10 @@ export const orderItems = pgTable(
       sql`${table.unitPriceSnapshot} >= 0
         and ${table.unitPriceSnapshot} <= 99999999.99`,
     ),
-    check("order_items_quantity_check", sql`${table.quantity} between 1 and 99`),
+    check(
+      "order_items_quantity_check",
+      sql`${table.quantity} between 1 and 99`,
+    ),
     check(
       "order_items_note_length_check",
       sql`char_length(${table.note}) <= 500`,

@@ -485,25 +485,61 @@ snapshot and daily order-number counter tables. Apply it with
 
 ### Customer orders
 
+#### Optional ordering-network restriction
+
+The restriction starts disabled. The Owner can configure it in admin **Shop
+settings → Ordering network**. Confirm the detected address to enroll the
+dedicated café browser. It receives an HttpOnly, revocable cookie; updates
+also require a currently authorized Manager or Owner. Remote admin sign-ins
+without that cookie do not update the approved IP. A manual override revokes
+the terminal, and revoking only the terminal leaves the approved IP active.
+Changes are recorded in the security log.
+
+Production requires `ORDERING_NETWORK_IP_SOURCE=direct` for a directly exposed
+API, or `ORDERING_NETWORK_IP_SOURCE=trusted-proxy` plus `TRUST_PROXY_CIDRS` for
+the actual proxy chain. Keep `TRUST_PROXY_HOPS=0` in either case. Direct mode
+uses the socket peer and rejects forwarding headers. Proxy mode refuses an
+untrusted peer, a missing client hop, or a trusted proxy's address as the guest
+address. If a previously enabled deployment loses this configuration, ordering
+stays blocked until it is corrected. Before enabling, ensure the edge
+sanitizes forwarding headers and clients cannot bypass it. Compare the API’s
+observed addresses on the café terminal, two guest Wi-Fi phones, and mobile
+data. Private addresses are accepted for local testing,
+not for production enrollment. This is exact IP matching, not proof of
+physical presence or a Wi-Fi SSID check. Shared ISP egress or per-device IPv6
+addresses may make it unsuitable for the deployment.
+
+Public menu, store hours, and QR resolution remain available. Outside the
+approved network, opening/resuming a visit, cart and order access (including
+cancellation), and table realtime access return `403 ORDERING_NETWORK_REQUIRED`.
+Store-hours rules still apply separately. Realtime connections share a policy
+read with a one-second cache per API process, invalidated on local changes;
+ordinary requests check against a fresh read. The setting uses the existing
+`settings` table; there is no additional database migration for this feature.
+
 All customer endpoints use the printed QR credential in `X-Table-Token` and
 are scoped to the table's current session:
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| POST | `/tables/orders` | Submit or resolve an explicitly reviewed cart; body requires `cartId`, `version`, `requestId`, `total` and `reviewFingerprint` |
+| POST | `/tables/orders` | Submit an explicitly reviewed cart with `cartId`, `version`, `requestId`, `total`, `reviewFingerprint` and `customerName`, or resolve an existing attempt |
 | GET | `/tables/orders?sessionId=UUID` | List this visit's orders, total and remaining limit |
 | POST | `/tables/orders/:id/cancel?sessionId=UUID` | Cancel an order while Pending confirmation or Received |
 
 Send the reviewed cart UUID as `cartId`, its `version`, its exact two-decimal
 `total` string, its `reviewFingerprint` from the cart response and a fresh
-UUIDv4 as `requestId`. Placement checks the cart identity and version under
+UUIDv4 as `requestId`. New placements also require `customerName`: a trimmed,
+single-line first name or nickname of at most 48 characters. Migration
+`0007_order_customer_name.sql` adds the field for staff handoff; legacy orders
+retain a null name. QR-scoped responses omit it. Placement checks the cart identity and version under
 lock and rejects changes to the reviewed lines even if the version and total
 are unchanged. Repeating a committed request ID in the same visit
 returns the original order with HTTP 200 without clearing or changing the
 cart again; a new order returns HTTP 201. If a response is lost, check the
 visit's order list for an order whose `id` equals `requestId` before offering
 a retry with the same body. If the revision can no longer be retried, send the
-same body with `resolveOnly: true`. It returns the existing receipt or
+same cart and request fields with `resolveOnly: true`, without `customerName`.
+It returns the existing receipt or
 `409 ORDER_ATTEMPT_CLOSED`; in the latter case, the reviewed version can no
 longer be used to place the order. Resolution never places an order or removes
 cart items. A replacement visit never accepts the old cart ID.

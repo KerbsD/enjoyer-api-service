@@ -46,11 +46,12 @@ export const NEXT_ORDER_STATUS: Partial<Record<OrderStatus, OrderStatus>> = {
   ready: "served",
 };
 
-export const PREVIOUS_ORDER_STATUS: Partial<Record<OrderStatus, OrderStatus>> = {
-  preparing: "received",
-  ready: "preparing",
-  served: "ready",
-};
+export const PREVIOUS_ORDER_STATUS: Partial<Record<OrderStatus, OrderStatus>> =
+  {
+    preparing: "received",
+    ready: "preparing",
+    served: "ready",
+  };
 
 export const orderStatusConflict = (status: OrderStatus): string => {
   switch (status) {
@@ -92,6 +93,7 @@ export type OrderItemView = {
 export type OrderView = {
   id: string;
   orderNumber: string;
+  customerName: string | null;
   tableId: number;
   tableName: string;
   tableSessionId: string;
@@ -131,11 +133,13 @@ const orderColumns = {
   rejectionReason: orders.rejectionReason,
   createdAt: orders.createdAt,
   updatedAt: orders.updatedAt,
+  customerName: orders.customerName,
 };
 
 type OrderRow = {
   id: string;
   orderNumber: string;
+  customerName: string | null;
   tableSessionId: string;
   tableId: number;
   tableName: string;
@@ -159,7 +163,10 @@ const iso = (value: Date | null): string | null =>
 
 // Loads lines and option snapshots for a batch of orders, then assembles the
 // API views. Batched queries keep the staff board from issuing N+1 reads.
-const hydrateOrders = async (rows: OrderRow[], executor: DbReader = db): Promise<OrderView[]> => {
+const hydrateOrders = async (
+  rows: OrderRow[],
+  executor: DbReader = db,
+): Promise<OrderView[]> => {
   if (rows.length === 0) return [];
   const orderIds = rows.map((row) => row.id);
 
@@ -226,6 +233,7 @@ const hydrateOrders = async (rows: OrderRow[], executor: DbReader = db): Promise
     return {
       id: row.id,
       orderNumber: row.orderNumber,
+      customerName: row.customerName,
       tableId: row.tableId,
       tableName: row.tableName,
       tableSessionId: row.tableSessionId,

@@ -5,6 +5,10 @@ import { can } from "../permissions.ts";
 import { readShopSettings } from "../settings.ts";
 import { idleCutoff } from "../tableSessions.ts";
 import { verifyAccessToken } from "../tokens.ts";
+import {
+  orderingNetworkFailure,
+  readRealtimeOrderingNetwork,
+} from "../orderingNetwork.ts";
 import type { RealtimeScope } from "./revisions.ts";
 
 export type AccessFailure = { status: number; code: string; message: string };
@@ -24,10 +28,16 @@ export const tableAccess = (
   tableId: number,
   sessionId: string,
   token: string,
+  clientAddress: string | null = null,
 ): RealtimeAccess => ({
   scope: { kind: "table", tableId, sessionId },
   key: `table:${tableId}`,
   async check() {
+    const networkFailure = await orderingNetworkFailure(
+      clientAddress,
+      readRealtimeOrderingNetwork,
+    );
+    if (networkFailure) return networkFailure;
     const [row] = await db
       .select({
         active: shopTables.active,

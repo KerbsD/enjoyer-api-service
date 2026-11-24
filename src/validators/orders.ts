@@ -9,14 +9,30 @@ import { booleanQueryField, paginationFields } from "./shared.ts";
 
 const INT4_MAX = 2_147_483_647;
 
-export const placeOrderSchema = z.strictObject({
+const checkoutFields = {
   cartId: z.uuid(),
   version: z.number().int().min(0),
   requestId: z.uuidv4(),
   total: z.string().regex(/^\d{1,12}\.\d{2}$/),
   reviewFingerprint: z.string().regex(/^[0-9a-f]{64}$/),
-  resolveOnly: z.literal(true).optional(),
-});
+};
+const customerName = z
+  .string()
+  .trim()
+  .min(1)
+  .max(48)
+  .refine(
+    (name) => !/[\p{Cc}\u202a-\u202e\u2066-\u2069]/u.test(name),
+    "Enter a single-line name.",
+  );
+export const placeOrderSchema = z.union([
+  z.strictObject({
+    ...checkoutFields,
+    customerName,
+    resolveOnly: z.undefined().optional(),
+  }),
+  z.strictObject({ ...checkoutFields, resolveOnly: z.literal(true) }),
+]);
 
 export const listStaffOrdersQuerySchema = z.strictObject({
   status: z.enum(ORDER_STATUSES).optional(),
@@ -55,7 +71,9 @@ export type MarkOrderPaidInput = z.infer<typeof markOrderPaidSchema>;
 export type CloseTableInput = z.infer<typeof closeTableSchema>;
 
 export const validatePlaceOrder = validateBody(placeOrderSchema);
-export const validateListStaffOrders = validateQuery(listStaffOrdersQuerySchema);
+export const validateListStaffOrders = validateQuery(
+  listStaffOrdersQuerySchema,
+);
 export const validateRejectOrder = validateBody(rejectOrderSchema);
 export const validateCancelOrder = validateBody(cancelOrderSchema);
 export const validateMarkOrderPaid = validateBody(markOrderPaidSchema);

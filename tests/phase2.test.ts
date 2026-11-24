@@ -13,7 +13,14 @@ const client = {
   async query(config: { text: string } | string, params: unknown[] = []) {
     const text = typeof config === "string" ? config : config.text;
     queries.push({ text, params });
-    if (["begin", "begin isolation level repeatable read read only", "commit", "rollback"].includes(text))
+    if (
+      [
+        "begin",
+        "begin isolation level repeatable read read only",
+        "commit",
+        "rollback",
+      ].includes(text)
+    )
       return { rows: [] };
     assert.ok(replies.length, `Unexpected query: ${text}`);
     const rows = replies.shift()!;
@@ -49,16 +56,19 @@ const { default: adminHolidays } =
   await import("../src/routes/storeHours/holidays.ts");
 const { getPublicStoreStatus } =
   await import("../src/controllers/storeHours/public.ts");
-const { default: publicTables } = await import("../src/routes/tables/public.ts");
+const { default: publicTables } =
+  await import("../src/routes/tables/public.ts");
 const { default: publicCart } = await import("../src/routes/cart/public.ts");
-const { default: publicOrders } = await import("../src/routes/orders/public.ts");
+const { default: publicOrders } =
+  await import("../src/routes/orders/public.ts");
 const { verifyJwt } = await import("../src/middlewares/verifyJwt.ts");
 const { signAccessToken } = await import("../src/lib/tokens.ts");
 const { default: errorHandler } =
   await import("../src/middlewares/errorHandler.ts");
 const { resolveStoreStatus } = await import("../src/lib/storeHours.ts");
 const { listStaffOrders } = await import("../src/controllers/orders/staff.ts");
-const { listStaffOrdersQuerySchema } = await import("../src/validators/orders.ts");
+const { listStaffOrdersQuerySchema } =
+  await import("../src/validators/orders.ts");
 const { validateOptionSelection, summarizeCart } =
   await import("../src/lib/cart.ts");
 const { toCents, fromCents } = await import("../src/lib/money.ts");
@@ -130,18 +140,51 @@ const sessionRow = (
 ];
 const cartRow = (version = 0) => [[cartId, sessionId, version, date, date]];
 const checkout = {
-  cartId, version: 0, requestId: "55555555-5555-4555-8555-555555555555", total: "300.00",
-  reviewFingerprint: createHash("sha256").update(JSON.stringify([
-    [10, 3, "Latte", "120.00", 2, "less ice", "150.00", "300.00", [
-      [5, 2, "Milk substitution", "Oat milk", "30.00"],
-    ]],
-  ])).digest("hex"),
+  cartId,
+  version: 0,
+  requestId: "55555555-5555-4555-8555-555555555555",
+  total: "300.00",
+  customerName: "Alex",
+  reviewFingerprint: createHash("sha256")
+    .update(
+      JSON.stringify([
+        [
+          10,
+          3,
+          "Latte",
+          "120.00",
+          2,
+          "less ice",
+          "150.00",
+          "300.00",
+          [[5, 2, "Milk substitution", "Oat milk", "30.00"]],
+        ],
+      ]),
+    )
+    .digest("hex"),
 };
 const submitOrder = (body: unknown = checkout) =>
   request("POST", "/tables/orders", body, { role: null, token });
 const orderRow = (status: "received" | "pending_confirmation") => [
-  checkout.requestId, "20261119-001", sessionId, 1, "Table 1", status, "300.00", "300.00",
-  "unpaid", null, null, null, null, null, null, null, date, date,
+  checkout.requestId,
+  "20261119-001",
+  sessionId,
+  1,
+  "Table 1",
+  status,
+  "300.00",
+  "300.00",
+  "unpaid",
+  null,
+  null,
+  null,
+  null,
+  null,
+  null,
+  null,
+  date,
+  date,
+  "Alex",
 ];
 const menuItemRow = (id = 3, available = true, hidden = false) => [
   [id, available, hidden],
@@ -369,7 +412,10 @@ test("order numbers use the shop-local calendar day and a padded daily counter",
   const instant = new Date("2026-11-12T16:30:00.000Z");
   const localDate = orderDateKey(instant, "Asia/Manila");
   assert.equal(localDate, "2026-11-13");
-  assert.equal(orderNumberFromCounter(localDate.replaceAll("-", ""), 1), "20261113-001");
+  assert.equal(
+    orderNumberFromCounter(localDate.replaceAll("-", ""), 1),
+    "20261113-001",
+  );
   assert.equal(orderNumberFromCounter("20261113", 1200), "20261113-1200");
 });
 
@@ -412,7 +458,10 @@ test("active-session order filter excludes closed visits without changing defaul
   queries = [];
   replies = [[], [[0]]];
   await listStaffOrders({} as never, res as never);
-  assert.equal((result as { pagination: { total: number } }).pagination.total, 0);
+  assert.equal(
+    (result as { pagination: { total: number } }).pagination.total,
+    0,
+  );
   assert.equal(queries.length, 2);
   for (const statement of queries) {
     assert.match(statement.text, /table_sessions/);
@@ -725,14 +774,7 @@ test("opening again reuses the current session and cart", async () => {
 });
 
 test("resuming reuses the exact remembered session without creating or joining", async () => {
-  setup(
-    defaultSettings,
-    [table],
-    sessionRow(),
-    cartRow(4),
-    sessionRow(),
-    [],
-  );
+  setup(defaultSettings, [table], sessionRow(), cartRow(4), sessionRow(), []);
   const result = await request(
     "POST",
     "/tables/resume",
@@ -768,7 +810,9 @@ test("resuming never adopts a replacement session", async () => {
   assert.equal(result.status, 409);
   assert.equal(result.data.code, "TABLE_SESSION_REQUIRED");
   assert.equal(result.data.data, undefined);
-  assert.ok(!queries.some(({ text }) => /^(insert|update|delete)\b/.test(text)));
+  assert.ok(
+    !queries.some(({ text }) => /^(insert|update|delete)\b/.test(text)),
+  );
 });
 
 test("resuming an expired visit requires a new visit", async () => {
@@ -785,7 +829,9 @@ test("resuming an expired visit requires a new visit", async () => {
   );
   assert.equal(result.status, 409);
   assert.equal(result.data.code, "TABLE_SESSION_REQUIRED");
-  assert.ok(!queries.some(({ text }) => /^(insert|update|delete)\b/.test(text)));
+  assert.ok(
+    !queries.some(({ text }) => /^(insert|update|delete)\b/.test(text)),
+  );
 });
 
 test("resuming validates the session ID and table token", async () => {
@@ -857,13 +903,26 @@ test("table opening rejects inactive and unknown QR tokens", async () => {
 // ---------- Order placement ----------
 
 test("checkout rejects a replacement cart under lock, even at the same version", async () => {
-  const replacement = [["33333333-3333-4333-8333-333333333333", sessionId, 0, date, date]];
-  setup([table], sessionRow(), cartRow(), defaultSettings, [], [], sessionRow(), replacement);
+  const replacement = [
+    ["33333333-3333-4333-8333-333333333333", sessionId, 0, date, date],
+  ];
+  setup(
+    [table],
+    sessionRow(),
+    cartRow(),
+    defaultSettings,
+    [],
+    [],
+    sessionRow(),
+    replacement,
+  );
   const result = await submitOrder();
   assert.equal(result.status, 409);
   assert.equal(result.data.code, "TABLE_SESSION_REQUIRED");
   assert.ok(queries.some(({ text }) => /from "carts".*for update/.test(text)));
-  assert.ok(queries.every(({ text }) => !/^(insert|update|delete)\b/.test(text)));
+  assert.ok(
+    queries.every(({ text }) => !/^(insert|update|delete)\b/.test(text)),
+  );
 });
 
 test("checkout enforces pending, limit, empty and unavailable gates without changing the cart", async () => {
@@ -871,38 +930,95 @@ test("checkout enforces pending, limit, empty and unavailable gates without chan
     ["ORDER_AWAITING_CONFIRMATION", [[[checkout.requestId]]]],
     ["ORDER_LIMIT_REACHED", [[], [[5]]]],
     ["CART_EMPTY", [[], [[0]], []]],
-    ["MENU_ITEM_UNAVAILABLE", [[], [[0]], [cartItemRow(10, 2, "", 3, "Latte", "120.00", false)], []]],
-    ["OPTION_SELECTION_INVALID", [[], [[0]], [cartItemRow()], [], [itemOptionGroupRow(5, 1)]]],
+    [
+      "MENU_ITEM_UNAVAILABLE",
+      [[], [[0]], [cartItemRow(10, 2, "", 3, "Latte", "120.00", false)], []],
+    ],
+    [
+      "OPTION_SELECTION_INVALID",
+      [[], [[0]], [cartItemRow()], [], [itemOptionGroupRow(5, 1)]],
+    ],
   ] satisfies [string, Reply[]][]) {
-    setup([table], sessionRow(), cartRow(), defaultSettings, [], [], sessionRow(), cartRow(), [], ...responses);
+    setup(
+      [table],
+      sessionRow(),
+      cartRow(),
+      defaultSettings,
+      [],
+      [],
+      sessionRow(),
+      cartRow(),
+      [],
+      ...responses,
+    );
     const result = await submitOrder();
     assert.ok([400, 409].includes(result.status), code);
     assert.equal(result.data.code, code);
-    assert.ok(queries.every(({ text }) => !/^(insert|update|delete)\b/.test(text)));
+    assert.ok(
+      queries.every(({ text }) => !/^(insert|update|delete)\b/.test(text)),
+    );
   }
 });
 
 test("checkout rejects a closed shop and changed details even when version and total match", async () => {
   setup(
-    [table], sessionRow(), cartRow(), defaultSettings,
+    [table],
+    sessionRow(),
+    cartRow(),
+    defaultSettings,
     Array.from({ length: 7 }, (_, day) => [day, null, null, true, date]),
-    [], sessionRow(), cartRow(), [],
+    [],
+    sessionRow(),
+    cartRow(),
+    [],
   );
   const closed = await submitOrder();
   assert.equal(closed.data.code, "STORE_CLOSED");
-  assert.ok(queries.every(({ text }) => !/^(insert|update|delete)\b/.test(text)));
+  assert.ok(
+    queries.every(({ text }) => !/^(insert|update|delete)\b/.test(text)),
+  );
 
   setup(
-    [table], sessionRow(), cartRow(), defaultSettings, [], [], sessionRow(), cartRow(), [], [], [[0]],
-    [cartItemRow(10, 2, "less ice", 3, "Renamed Latte")], [optionRow()], [itemOptionGroupRow()],
-    cartRow(), [cartItemRow(10, 2, "less ice", 3, "Renamed Latte")], [optionRow()],
+    [table],
+    sessionRow(),
+    cartRow(),
+    defaultSettings,
+    [],
+    [],
+    sessionRow(),
+    cartRow(),
+    [],
+    [],
+    [[0]],
+    [cartItemRow(10, 2, "less ice", 3, "Renamed Latte")],
+    [optionRow()],
+    [itemOptionGroupRow()],
+    cartRow(),
+    [cartItemRow(10, 2, "less ice", 3, "Renamed Latte")],
+    [optionRow()],
   );
   const changed = await submitOrder();
   assert.equal(changed.status, 409);
   assert.equal(changed.data.code, "CART_VERSION_CONFLICT");
   assert.equal(changed.data.data.totals.total, "300.00");
-  assert.notEqual(changed.data.data.reviewFingerprint, checkout.reviewFingerprint);
-  assert.ok(queries.every(({ text }) => !/^(insert|update|delete)\b/.test(text)));
+  assert.notEqual(
+    changed.data.data.reviewFingerprint,
+    checkout.reviewFingerprint,
+  );
+  assert.ok(
+    queries.every(({ text }) => !/^(insert|update|delete)\b/.test(text)),
+  );
+});
+
+test("checkout requires a valid name before running placement", async () => {
+  for (const customerName of [undefined, " \t ", "a".repeat(49), "Alex\nSam"]) {
+    setup([table], sessionRow(), cartRow());
+    const result = await submitOrder({ ...checkout, customerName });
+    assert.equal(result.status, 400);
+    assert.ok(
+      queries.every(({ text }) => !/^(insert|update|delete)\b/.test(text)),
+    );
+  }
 });
 
 test("checkout snapshots the order and clears the cart in the same transaction", async () => {
@@ -911,67 +1027,164 @@ test("checkout snapshots the order and clears the cart in the same transaction",
     ["open", "received"],
   ] as const) {
     setup(
-      [table], sessionRow(sessionStatus), cartRow(), defaultSettings, [], [],
-      sessionRow(sessionStatus), cartRow(), [], [], [[0]],
-      [cartItemRow(10, 2, "less ice")], [optionRow()], [itemOptionGroupRow()],
-      [[1]], [[checkout.requestId]], [[20]], [], [], [], [],
-      [orderRow(orderStatus)], [[20, checkout.requestId, 3, "Latte", "120.00", 2, "less ice", "300.00"]],
-      [[30, 20, "Oat milk", "Milk substitution", "30.00"]], cartRow(1), [],
+      [table],
+      sessionRow(sessionStatus),
+      cartRow(),
+      defaultSettings,
+      [],
+      [],
+      sessionRow(sessionStatus),
+      cartRow(),
+      [],
+      [],
+      [[0]],
+      [cartItemRow(10, 2, "less ice")],
+      [optionRow()],
+      [itemOptionGroupRow()],
+      [[1]],
+      [[checkout.requestId]],
+      [[20]],
+      [],
+      [],
+      [],
+      [],
+      [orderRow(orderStatus)],
+      [[20, checkout.requestId, 3, "Latte", "120.00", 2, "less ice", "300.00"]],
+      [[30, 20, "Oat milk", "Milk substitution", "30.00"]],
+      cartRow(1),
+      [],
     );
-    const result = await submitOrder();
+    const result = await submitOrder({ ...checkout, customerName: "  Alex  " });
     assert.equal(result.status, 201);
     assert.equal(result.data.data.order.status, orderStatus);
+    assert.equal("customerName" in result.data.data.order, false);
     assert.equal(result.data.data.order.items[0].note, "less ice");
-    assert.equal(result.data.data.order.items[0].options[0].priceDelta, "30.00");
+    assert.equal(
+      result.data.data.order.items[0].options[0].priceDelta,
+      "30.00",
+    );
     assert.equal(result.data.data.cart.version, 1);
     assert.deepEqual(result.data.data.cart.items, []);
     assert.equal(result.data.data.summary.ordersRemaining, 4);
-    const insert = queries.findIndex(({ text }) => text.startsWith('insert into "orders"'));
-    const clear = queries.findIndex(({ text }) => text.startsWith('delete from "cart_items"'));
-    assert.ok(insert > 0 && clear > insert && queries.findIndex(({ text }) => text === "commit") > clear);
+    const insert = queries.findIndex(({ text }) =>
+      text.startsWith('insert into "orders"'),
+    );
+    const clear = queries.findIndex(({ text }) =>
+      text.startsWith('delete from "cart_items"'),
+    );
+    assert.ok(
+      insert > 0 &&
+        clear > insert &&
+        queries.findIndex(({ text }) => text === "commit") > clear,
+    );
     assert.ok(queries[insert].params.includes(checkout.requestId));
+    assert.ok(queries[insert].params.includes("Alex"));
     assert.ok(queries[insert].params.includes(orderStatus));
-    assert.ok(queries.find(({ text }) => text.startsWith('insert into "order_items"'))?.params.includes("less ice"));
+    assert.ok(
+      queries
+        .find(({ text }) => text.startsWith('insert into "order_items"'))
+        ?.params.includes("less ice"),
+    );
   }
 });
 
 test("retrying a committed order returns its receipt without rewriting a newer cart", async () => {
   setup(
-    [table], sessionRow(), cartRow(2), defaultSettings, [], [],
-    sessionRow(), cartRow(2), [[checkout.requestId]], [[1]],
-    [orderRow("pending_confirmation")], [], cartRow(2), [],
+    [table],
+    sessionRow(),
+    cartRow(2),
+    defaultSettings,
+    [],
+    [],
+    sessionRow(),
+    cartRow(2),
+    [[checkout.requestId]],
+    [[1]],
+    [orderRow("pending_confirmation")],
+    [],
+    cartRow(2),
+    [],
   );
   const replay = await submitOrder();
   assert.equal(replay.status, 200);
   assert.equal(replay.data.data.order.id, checkout.requestId);
   assert.equal(replay.data.data.cart.version, 2);
-  assert.ok(queries.every(({ text }) => !/^(insert|update|delete)\b/.test(text)));
+  assert.ok(
+    queries.every(({ text }) => !/^(insert|update|delete)\b/.test(text)),
+  );
 });
 
 test("resolution fences off a delayed placement without clearing its cart", async () => {
-  setup([table], sessionRow(), cartRow(), defaultSettings, sessionRow(), cartRow(), [], []);
-  const closed = await submitOrder({ ...checkout, resolveOnly: true });
+  setup(
+    [table],
+    sessionRow(),
+    cartRow(),
+    defaultSettings,
+    sessionRow(),
+    cartRow(),
+    [],
+    [],
+  );
+  const closed = await submitOrder({
+    ...checkout,
+    customerName: undefined,
+    resolveOnly: true,
+  });
   assert.equal(closed.status, 409);
   assert.equal(closed.data.code, "ORDER_ATTEMPT_CLOSED");
-  assert.equal(queries.filter(({ text }) => text.startsWith('update "carts"')).length, 1);
+  assert.equal(
+    queries.filter(({ text }) => text.startsWith('update "carts"')).length,
+    1,
+  );
   assert.ok(queries.every(({ text }) => !/^(insert|delete)\b/.test(text)));
 
-  setup([table], sessionRow(), cartRow(1), defaultSettings, [], [], sessionRow(), cartRow(1), [], cartRow(1), [cartItemRow()], [optionRow()]);
+  setup(
+    [table],
+    sessionRow(),
+    cartRow(1),
+    defaultSettings,
+    [],
+    [],
+    sessionRow(),
+    cartRow(1),
+    [],
+    cartRow(1),
+    [cartItemRow()],
+    [optionRow()],
+  );
   const delayed = await submitOrder();
   assert.equal(delayed.data.code, "CART_VERSION_CONFLICT");
   assert.equal(delayed.data.data.items.length, 1);
-  assert.ok(queries.every(({ text }) => !/^(insert|update|delete)\b/.test(text)));
+  assert.ok(
+    queries.every(({ text }) => !/^(insert|update|delete)\b/.test(text)),
+  );
 });
 
 test("resolution returns a committed receipt instead of fencing a newer cart", async () => {
   setup(
-    [table], sessionRow(), cartRow(1), defaultSettings, sessionRow(), cartRow(1),
-    [[checkout.requestId]], [[1]], [orderRow("pending_confirmation")], [], cartRow(1), [],
+    [table],
+    sessionRow(),
+    cartRow(1),
+    defaultSettings,
+    sessionRow(),
+    cartRow(1),
+    [[checkout.requestId]],
+    [[1]],
+    [orderRow("pending_confirmation")],
+    [],
+    cartRow(1),
+    [],
   );
-  const placed = await submitOrder({ ...checkout, resolveOnly: true });
+  const placed = await submitOrder({
+    ...checkout,
+    customerName: undefined,
+    resolveOnly: true,
+  });
   assert.equal(placed.status, 200);
   assert.equal(placed.data.data.order.id, checkout.requestId);
-  assert.ok(queries.every(({ text }) => !/^(insert|update|delete)\b/.test(text)));
+  assert.ok(
+    queries.every(({ text }) => !/^(insert|update|delete)\b/.test(text)),
+  );
 });
 
 // ---------- Table order tracking ----------
@@ -980,8 +1193,16 @@ test("a remembered visit cannot list or cancel orders in its replacement", async
   const staleId = "33333333-3333-4333-8333-333333333333";
   for (const method of ["GET", "POST"]) {
     setup([table], sessionRow(), cartRow());
-    const path = method === "GET" ? "/tables/orders" : `/tables/orders/${checkout.requestId}/cancel`;
-    const result = await request(method, `${path}?sessionId=${staleId}`, undefined, { role: null, token });
+    const path =
+      method === "GET"
+        ? "/tables/orders"
+        : `/tables/orders/${checkout.requestId}/cancel`;
+    const result = await request(
+      method,
+      `${path}?sessionId=${staleId}`,
+      undefined,
+      { role: null, token },
+    );
     assert.equal(result.status, 409);
     assert.equal(result.data.code, "TABLE_SESSION_REQUIRED");
     assert.equal(result.data.data, undefined);
@@ -993,25 +1214,60 @@ test("tracking snapshots current orders and excludes cancelled totals and capaci
   const cancelled = orderRow("received");
   cancelled[0] = "33333333-3333-4333-8333-333333333333";
   cancelled[5] = "cancelled";
-  setup([table], sessionRow("open"), cartRow(), defaultSettings, sessionRow("open"),
-    [orderRow("received"), cancelled], [],);
-  const result = await request("GET", `/tables/orders?sessionId=${sessionId}`, undefined, { role: null, token });
+  setup(
+    [table],
+    sessionRow("open"),
+    cartRow(),
+    defaultSettings,
+    sessionRow("open"),
+    [orderRow("received"), cancelled],
+    [],
+  );
+  const result = await request(
+    "GET",
+    `/tables/orders?sessionId=${sessionId}`,
+    undefined,
+    { role: null, token },
+  );
   assert.equal(result.status, 200);
   assert.equal(result.data.data.session.id, sessionId);
   assert.equal(result.data.data.orders.length, 2);
+  assert.ok(
+    result.data.data.orders.every(
+      (order: object) => !("customerName" in order),
+    ),
+  );
   assert.equal(result.data.data.summary.total, "300.00");
   assert.equal(result.data.data.summary.ordersRemaining, 4);
-  assert.ok(queries.some(({ text }) => text === "begin isolation level repeatable read read only"));
+  assert.ok(
+    queries.some(
+      ({ text }) => text === "begin isolation level repeatable read read only",
+    ),
+  );
 });
 
 test("cancellation checks the locked status and never revives an expired visit", async () => {
   const path = `/tables/orders/${checkout.requestId}/cancel?sessionId=${sessionId}`;
   for (const [status, session, code] of [
     ["preparing", sessionRow("open"), "ORDER_NOT_CANCELLABLE"],
-    ["received", sessionRow("open", new Date("2020-01-01")), "TABLE_SESSION_REQUIRED"],
+    [
+      "received",
+      sessionRow("open", new Date("2020-01-01")),
+      "TABLE_SESSION_REQUIRED",
+    ],
   ] as const) {
-    setup([table], sessionRow("open"), cartRow(), defaultSettings, [[checkout.requestId, status]], session);
-    const rejected = await request("POST", path, undefined, { role: null, token });
+    setup(
+      [table],
+      sessionRow("open"),
+      cartRow(),
+      defaultSettings,
+      [[checkout.requestId, status]],
+      session,
+    );
+    const rejected = await request("POST", path, undefined, {
+      role: null,
+      token,
+    });
     assert.equal(rejected.status, 409);
     assert.equal(rejected.data.code, code);
     assert.ok(queries.every(({ text }) => !text.startsWith("update")));
@@ -1021,14 +1277,31 @@ test("cancellation checks the locked status and never revives an expired visit",
 test("cancelling a live received order changes its status without returning items to the cart", async () => {
   const cancelled = orderRow("received");
   cancelled[5] = "cancelled";
-  setup([table], sessionRow("open"), cartRow(), defaultSettings, [[checkout.requestId, "received"]],
-    sessionRow("open"), [], [], [cancelled], []);
+  setup(
+    [table],
+    sessionRow("open"),
+    cartRow(),
+    defaultSettings,
+    [[checkout.requestId, "received"]],
+    sessionRow("open"),
+    [],
+    [],
+    [cancelled],
+    [],
+  );
   const path = `/tables/orders/${checkout.requestId}/cancel?sessionId=${sessionId}`;
   const result = await request("POST", path, undefined, { role: null, token });
   assert.equal(result.status, 200);
   assert.equal(result.data.data.status, "cancelled");
-  assert.ok(queries.some(({ text, params }) => text.startsWith('update "orders"') && params.includes("cancelled")));
-  assert.ok(queries.every(({ text }) => !/^(insert|update|delete).*cart/.test(text)));
+  assert.ok(
+    queries.some(
+      ({ text, params }) =>
+        text.startsWith('update "orders"') && params.includes("cancelled"),
+    ),
+  );
+  assert.ok(
+    queries.every(({ text }) => !/^(insert|update|delete).*cart/.test(text)),
+  );
 });
 
 // ---------- Shared cart ----------
@@ -1047,7 +1320,8 @@ test("cart authentication requires a valid table token and live session", async 
     token,
   });
   assert.equal(noSession.status, 409);
-  assert.equal(noSession.data.code, "TABLE_SESSION_REQUIRED");});
+  assert.equal(noSession.data.code, "TABLE_SESSION_REQUIRED");
+});
 
 test("cart reads show current prices, options and server totals", async () => {
   setup(
@@ -1075,10 +1349,14 @@ test("cart reads show current prices, options and server totals", async () => {
   assert.equal(line.unitPrice, "150.00");
   assert.equal(line.lineTotal, "300.00");
   assert.equal(line.options[0].name, "Oat milk");
-  const start = queries.findIndex(({ text }) => text === "begin isolation level repeatable read read only");
+  const start = queries.findIndex(
+    ({ text }) => text === "begin isolation level repeatable read read only",
+  );
   assert.notEqual(start, -1);
   assert.deepEqual(
-    queries.slice(start + 1, start + 4).map(({ text }) => text.match(/ from "([^"]+)"/)?.[1]),
+    queries
+      .slice(start + 1, start + 4)
+      .map(({ text }) => text.match(/ from "([^"]+)"/)?.[1]),
     ["carts", "cart_items", "cart_item_options"],
   );
   assert.equal(queries[start + 4]?.text, "commit");
@@ -1086,7 +1364,10 @@ test("cart reads show current prices, options and server totals", async () => {
 
 test("a cart removed before the snapshot requires a new visit", async () => {
   setup([table], sessionRow(), cartRow(0), []);
-  const result = await request("GET", "/tables/cart", undefined, { role: null, token });
+  const result = await request("GET", "/tables/cart", undefined, {
+    role: null,
+    token,
+  });
   assert.equal(result.status, 409);
   assert.equal(result.data.code, "TABLE_SESSION_REQUIRED");
 });
@@ -1176,7 +1457,9 @@ test("cart writes reject missing cart IDs, malformed versions and unknown lines"
   for (const query of [
     "?version=0",
     "?cartId=invalid&version=0",
-    ...["-1", "abc", "1.5"].map((version) => `?cartId=${cartId}&version=${version}`),
+    ...["-1", "abc", "1.5"].map(
+      (version) => `?cartId=${cartId}&version=${version}`,
+    ),
   ]) {
     setup([table], sessionRow(), cartRow(0));
     assert.equal(
@@ -1194,7 +1477,10 @@ test("cart writes reject missing cart IDs, malformed versions and unknown lines"
     ["PATCH", "/tables/cart/items/99", { quantity: 2, version: 0 }],
   ] as const) {
     setup([table], sessionRow(), cartRow(0));
-    assert.equal((await request(method, path, value, { role: null, token })).status, 400);
+    assert.equal(
+      (await request(method, path, value, { role: null, token })).status,
+      400,
+    );
   }
 
   setup(
@@ -1288,10 +1574,15 @@ test("cart deletes remove one line or clear the whole cart", async () => {
     cartRow(2),
     [],
   );
-  const cleared = await request("DELETE", `/tables/cart?cartId=${cartId}&version=1`, undefined, {
-    role: null,
-    token,
-  });
+  const cleared = await request(
+    "DELETE",
+    `/tables/cart?cartId=${cartId}&version=1`,
+    undefined,
+    {
+      role: null,
+      token,
+    },
+  );
   assert.equal(cleared.status, 200);
   assert.equal(cleared.data.data.version, 2);
   assert.deepEqual(cleared.data.data.totals, {
@@ -1310,13 +1601,24 @@ test("all cart writes reject a different locked cart even if the version matches
     ["DELETE", `/tables/cart/items/10?cartId=${cartId}&version=0`, undefined],
     ["DELETE", `/tables/cart?cartId=${cartId}&version=0`, undefined],
   ] as const) {
-    setup([table], sessionRow(), cartRow(0), defaultSettings, sessionRow(), replacementCart);
+    setup(
+      [table],
+      sessionRow(),
+      cartRow(0),
+      defaultSettings,
+      sessionRow(),
+      replacementCart,
+    );
     const result = await request(method, path, body, { role: null, token });
     assert.equal(result.status, 409, `${method} ${path}`);
     assert.equal(result.data.code, "TABLE_SESSION_REQUIRED");
     assert.equal(result.data.data, undefined);
-    assert.ok(queries.some(({ text }) => /from "carts".*for update/.test(text)));
-    assert.ok(!queries.some(({ text }) => /^(insert|update|delete)\b/.test(text)));
+    assert.ok(
+      queries.some(({ text }) => /from "carts".*for update/.test(text)),
+    );
+    assert.ok(
+      !queries.some(({ text }) => /^(insert|update|delete)\b/.test(text)),
+    );
     assert.equal(replies.length, 0);
   }
 });

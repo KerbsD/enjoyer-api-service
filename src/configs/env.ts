@@ -1,4 +1,5 @@
 import "dotenv/config";
+import { isIP } from "node:net";
 import { z } from "zod";
 
 // "https://app.example.com" is valid; "https://app.example.com/" (trailing slash),
@@ -30,6 +31,26 @@ const originList = z
     "each origin must look like https://app.example.com (scheme + host [+ port], no path, no trailing slash)",
   );
 
+const proxyCidrs = z
+  .string()
+  .transform((raw) => raw.split(",").map((part) => part.trim()))
+  .refine(
+    (list) =>
+      list.every((cidr) => {
+        const [address, prefix, extra] = cidr.split("/");
+        const family = isIP(address);
+        return (
+          extra === undefined &&
+          family !== 0 &&
+          !address.includes("%") &&
+          /^\d{1,3}$/.test(prefix ?? "") &&
+          Number(prefix) > 0 &&
+          Number(prefix) <= (family === 4 ? 32 : 128)
+        );
+      }),
+    "list explicit proxy CIDRs; blanket /0 ranges are not allowed",
+  );
+
 const envSchema = z
   .object({
     // No default on purpose: a missing NODE_ENV in production must fail loudly,
@@ -55,6 +76,8 @@ const envSchema = z
     // How many reverse proxies sit in front of the app (0 = none).
     // Wrong values let clients spoof X-Forwarded-For and dodge IP rate limits.
     TRUST_PROXY_HOPS: z.coerce.number().int().min(0).max(10).default(0),
+    TRUST_PROXY_CIDRS: proxyCidrs.optional(),
+    ORDERING_NETWORK_IP_SOURCE: z.enum(["direct", "trusted-proxy"]).optional(),
 
     DATABASE_URL: z
       .string()
@@ -123,7 +146,10 @@ const envSchema = z
 
     // Optional separate customer frontend origin for printed table QR links.
     // Falls back to CLIENT_URL during API development.
-    CUSTOMER_URL: z.url().refine(isPlainOrigin, "must be a plain http(s) origin").optional(),
+    CUSTOMER_URL: z
+      .url()
+      .refine(isPlainOrigin, "must be a plain http(s) origin")
+      .optional(),
 
     // Comma-separated list, e.g. "https://app.example.com,https://admin.example.com"
     CORS_ORIGINS: originList,
@@ -134,6 +160,28 @@ const envSchema = z
     // Rejects passwords found in known breaches (HaveIBeenPwned, k-anonymity)
     PWNED_PASSWORD_CHECK: z.enum(["on", "off"]).default("on"),
   })
+  .refine((cfg) => !cfg.TRUST_PROXY_CIDRS || cfg.TRUST_PROXY_HOPS === 0, {
+    error: "use explicit proxy CIDRs or a hop count, not both",
+    path: ["TRUST_PROXY_CIDRS"],
+  })
+  .refine(
+    (cfg) =>
+      cfg.ORDERING_NETWORK_IP_SOURCE !== "trusted-proxy" ||
+      !!cfg.TRUST_PROXY_CIDRS,
+    {
+      error: "trusted-proxy mode requires TRUST_PROXY_CIDRS",
+      path: ["ORDERING_NETWORK_IP_SOURCE"],
+    },
+  )
+  .refine(
+    (cfg) =>
+      cfg.ORDERING_NETWORK_IP_SOURCE !== "direct" ||
+      (!cfg.TRUST_PROXY_CIDRS && cfg.TRUST_PROXY_HOPS === 0),
+    {
+      error: "direct mode cannot trust proxy forwarding",
+      path: ["ORDERING_NETWORK_IP_SOURCE"],
+    },
+  )
   .refine(
     (cfg) =>
       cfg.NODE_ENV !== "production" ||
@@ -152,8 +200,14 @@ const envSchema = z
     },
   )
   .refine(
-    (cfg) => cfg.NODE_ENV !== "production" || !cfg.CUSTOMER_URL || cfg.CUSTOMER_URL.startsWith("https://"),
-    { error: "must be https:// when NODE_ENV=production", path: ["CUSTOMER_URL"] },
+    (cfg) =>
+      cfg.NODE_ENV !== "production" ||
+      !cfg.CUSTOMER_URL ||
+      cfg.CUSTOMER_URL.startsWith("https://"),
+    {
+      error: "must be https:// when NODE_ENV=production",
+      path: ["CUSTOMER_URL"],
+    },
   )
   .refine(
     (cfg) => {

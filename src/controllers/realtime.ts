@@ -10,6 +10,7 @@ import {
   POLL_INTERVAL_MS,
 } from "../lib/realtime/stream.ts";
 import { validateQuery } from "../lib/validate.ts";
+import { requestOrderingAddress } from "../lib/orderingNetwork.ts";
 
 const fields = {
   since: z
@@ -28,17 +29,16 @@ export const validateTableRealtime = validateQuery(
 export const prepareTableRealtime: RequestHandler = async (req, res, next) => {
   const context = getTableSessionContext(res);
   if (res.locals.query.sessionId !== context.session.id)
-    return res
-      .status(409)
-      .json({
-        success: false,
-        code: "TABLE_SESSION_REQUIRED",
-        message: "This table session has ended. Scan the QR code again.",
-      });
+    return res.status(409).json({
+      success: false,
+      code: "TABLE_SESSION_REQUIRED",
+      message: "This table session has ended. Scan the QR code again.",
+    });
   const access = tableAccess(
     context.table.id,
     context.session.id,
     req.get("x-table-token")!,
+    requestOrderingAddress(req),
   );
   const failure = await access.check();
   if (failure)

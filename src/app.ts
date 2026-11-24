@@ -13,6 +13,7 @@ import { requestLogger } from "./middlewares/requestLogger.ts";
 import errorHandler from "./middlewares/errorHandler.ts";
 import notFound from "./middlewares/notFound.ts";
 import { noStore } from "./middlewares/noStore.ts";
+import { requireOrderingNetwork } from "./middlewares/requireOrderingNetwork.ts";
 import { verifyJwt } from "./middlewares/verifyJwt.ts";
 
 import loginRoute from "./routes/auth/login.ts";
@@ -33,6 +34,7 @@ import staffTablesRoute from "./routes/tables/staff.ts";
 import publicTablesRoute from "./routes/tables/public.ts";
 import publicCartRoute from "./routes/cart/public.ts";
 import adminSettingsRoute from "./routes/settings/admin.ts";
+import orderingNetworkRoute from "./routes/settings/orderingNetwork.ts";
 import adminStoreHoursRoute from "./routes/storeHours/admin.ts";
 import adminHolidayOverridesRoute from "./routes/storeHours/holidays.ts";
 import { getPublicStoreStatus } from "./controllers/storeHours/public.ts";
@@ -40,10 +42,15 @@ import publicOrdersRoute from "./routes/orders/public.ts";
 import staffOrdersRoute from "./routes/orders/staff.ts";
 import staffOrderTablesRoute from "./routes/orders/tables.ts";
 import { staffRealtime, tableRealtime } from "./routes/realtime.ts";
-import { dashboardRoute, exportRoute, historyRoute } from "./routes/reports/admin.ts";
+import {
+  dashboardRoute,
+  exportRoute,
+  historyRoute,
+} from "./routes/reports/admin.ts";
 
 const app = express();
-if (env.TRUST_PROXY_HOPS > 0) app.set("trust proxy", env.TRUST_PROXY_HOPS);
+if (env.TRUST_PROXY_CIDRS) app.set("trust proxy", env.TRUST_PROXY_CIDRS);
+else if (env.TRUST_PROXY_HOPS > 0) app.set("trust proxy", env.TRUST_PROXY_HOPS);
 app.disable("x-powered-by");
 
 app.use(requestLogger);
@@ -90,8 +97,9 @@ app.use("/auth/invite", inviteRoute);
 // verifyJwt. Customers never log in.
 app.get("/menu", handlePublicMenu);
 app.get("/store/status", getPublicStoreStatus);
-app.use("/tables/cart", publicCartRoute);
-app.use("/tables/orders", publicOrdersRoute);
+app.use("/tables/cart", requireOrderingNetwork, publicCartRoute);
+app.use("/tables/orders", requireOrderingNetwork, publicOrdersRoute);
+app.post(["/tables/open", "/tables/resume"], requireOrderingNetwork);
 app.use("/tables", publicTablesRoute);
 
 app.use(verifyJwt);
@@ -107,6 +115,7 @@ app.use("/staff/tables", staffTablesRoute);
 app.use("/staff/orders", staffOrdersRoute);
 app.use("/staff/tables", staffOrderTablesRoute);
 app.use("/admin/settings", adminSettingsRoute);
+app.use("/admin/ordering-network", orderingNetworkRoute);
 app.use("/admin/store-hours", adminStoreHoursRoute);
 app.use("/admin/holiday-overrides", adminHolidayOverridesRoute);
 app.use("/admin/dashboard", dashboardRoute);

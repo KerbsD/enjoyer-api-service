@@ -30,6 +30,7 @@ import {
   ORDER_COUNT_STATUSES,
   summarizeOrders,
 } from "../../lib/orders.ts";
+import type { OrderView } from "../../lib/orders.ts";
 import { readShopSettings } from "../../lib/settings.ts";
 import { getStoreStatus } from "../../lib/storeHours.ts";
 import { idleCutoff } from "../../lib/tableSessions.ts";
@@ -53,6 +54,12 @@ type PlacementResult =
   | Failure
   | { kind: "ok"; orderId: string; ordersUsed: number; replayed?: boolean };
 
+// The name is for staff handoff, not for other QR holders at the table.
+const customerOrderView = ({
+  customerName: _customerName,
+  ...order
+}: OrderView) => order;
+
 const sessionRequired = (res: Response) =>
   res.status(409).json({
     success: false,
@@ -75,9 +82,7 @@ const selectionFailure = (
   code: selection.code,
   message: selection.message,
   details: {
-    ...(selection.groupId === undefined
-      ? {}
-      : { groupId: selection.groupId }),
+    ...(selection.groupId === undefined ? {} : { groupId: selection.groupId }),
     ...(selection.minSelections === undefined
       ? {}
       : { minSelections: selection.minSelections }),
@@ -94,7 +99,12 @@ const countSessionOrders = async (tx: DbTransaction, sessionId: string) => {
   const [row] = await tx
     .select({ count: sql<number>`count(*)::int` })
     .from(orders)
-    .where(and(eq(orders.tableSessionId, sessionId), inArray(orders.status, ORDER_COUNT_STATUSES)));
+    .where(
+      and(
+        eq(orders.tableSessionId, sessionId),
+        inArray(orders.status, ORDER_COUNT_STATUSES),
+      ),
+    );
   return row?.count ?? 0;
 };
 
@@ -120,7 +130,12 @@ export const placeOrder = async (req: Request, res: Response) => {
     const [existing] = await tx
       .select({ id: orders.id })
       .from(orders)
-      .where(and(eq(orders.id, input.requestId), eq(orders.tableSessionId, session.id)))
+      .where(
+        and(
+          eq(orders.id, input.requestId),
+          eq(orders.tableSessionId, session.id),
+        ),
+      )
       .limit(1);
     if (existing) {
       return {
@@ -136,14 +151,16 @@ export const placeOrder = async (req: Request, res: Response) => {
       if (cart.version < input.version)
         return { kind: "conflict", cartId: cart.id };
       if (cart.version === input.version)
-        await tx.update(carts)
+        await tx
+          .update(carts)
           .set({ version: cart.version + 1, updatedAt: now })
           .where(eq(carts.id, cart.id));
       return {
         kind: "error",
         status: 409,
         code: "ORDER_ATTEMPT_CLOSED",
-        message: "This order was not placed. Review the latest cart before ordering.",
+        message:
+          "This order was not placed. Review the latest cart before ordering.",
       };
     }
     if (cart.version !== input.version)
@@ -154,7 +171,8 @@ export const placeOrder = async (req: Request, res: Response) => {
         kind: "error",
         status: 409,
         code: "STORE_CLOSED",
-        message: "The store is closed right now. Ordering opens again during store hours.",
+        message:
+          "The store is closed right now. Ordering opens again during store hours.",
         details: { nextOpen: store?.nextOpen },
       };
 
@@ -248,7 +266,10 @@ export const placeOrder = async (req: Request, res: Response) => {
     });
     const total = fromCents(subtotalCents);
     // Compare the exact lines we will snapshot, even if the total is unchanged.
-    if (total !== input.total || cartReviewFingerprint(items) !== input.reviewFingerprint)
+    if (
+      total !== input.total ||
+      cartReviewFingerprint(items) !== input.reviewFingerprint
+    )
       return { kind: "conflict", cartId: cart.id };
 
     const orderNumber = await allocateOrderNumber(
@@ -261,6 +282,7 @@ export const placeOrder = async (req: Request, res: Response) => {
       .values({
         id: input.requestId,
         orderNumber,
+        customerName: input.customerName,
         tableSessionId: session.id,
         tableId: context.table.id,
         // A provisional session (no confirmed first order yet) keeps every
@@ -342,7 +364,7 @@ export const placeOrder = async (req: Request, res: Response) => {
         success: true,
         currency: CURRENCY,
         data: {
-          order,
+          order: customerOrderView(order),
           cart,
           summary: {
             orderLimit: context.table.orderLimit,
@@ -360,16 +382,29 @@ export const placeOrder = async (req: Request, res: Response) => {
 
 export const listCustomerOrders = async (req: Request, res: Response) => {
   const context = getTableSessionContext(res);
-  if (req.query.sessionId !== undefined && req.query.sessionId !== context.session.id)
+  if (
+    req.query.sessionId !== undefined &&
+    req.query.sessionId !== context.session.id
+  )
     return sessionRequired(res);
   const settings = await readShopSettings();
-  const result = await db.transaction(async (tx) => {
-    const [session] = await tx.select().from(tableSessions)
-      .where(eq(tableSessions.id, context.session.id)).limit(1);
-    if (!session || session.status === "closed" ||
-        session.lastActivityAt < idleCutoff(settings, new Date())) return null;
-    return { session, views: await loadSessionOrders(session.id, tx) };
-  }, { isolationLevel: "repeatable read", accessMode: "read only" });
+  const result = await db.transaction(
+    async (tx) => {
+      const [session] = await tx
+        .select()
+        .from(tableSessions)
+        .where(eq(tableSessions.id, context.session.id))
+        .limit(1);
+      if (
+        !session ||
+        session.status === "closed" ||
+        session.lastActivityAt < idleCutoff(settings, new Date())
+      )
+        return null;
+      return { session, views: await loadSessionOrders(session.id, tx) };
+    },
+    { isolationLevel: "repeatable read", accessMode: "read only" },
+  );
   if (!result) return sessionRequired(res);
   const { session, views } = result;
   const summary = summarizeOrders(views);
@@ -385,7 +420,7 @@ export const listCustomerOrders = async (req: Request, res: Response) => {
         startedAt: session.startedAt?.toISOString() ?? null,
         lastActivityAt: session.lastActivityAt.toISOString(),
       },
-      orders: views,
+      orders: views.map(customerOrderView),
       summary: {
         orderLimit: context.table.orderLimit,
         orderCount: views.length,
@@ -408,7 +443,10 @@ export const cancelCustomerOrder = async (req: Request, res: Response) => {
   if (!id) return orderNotFound(res);
 
   const context = getTableSessionContext(res);
-  if (req.query.sessionId !== undefined && req.query.sessionId !== context.session.id)
+  if (
+    req.query.sessionId !== undefined &&
+    req.query.sessionId !== context.session.id
+  )
     return sessionRequired(res);
   const settings = await readShopSettings();
 
@@ -425,10 +463,7 @@ export const cancelCustomerOrder = async (req: Request, res: Response) => {
         .select({ id: orders.id, status: orders.status })
         .from(orders)
         .where(
-          and(
-            eq(orders.id, id),
-            eq(orders.tableSessionId, context.session.id),
-          ),
+          and(eq(orders.id, id), eq(orders.tableSessionId, context.session.id)),
         )
         .limit(1)
         .for("update");
@@ -443,8 +478,12 @@ export const cancelCustomerOrder = async (req: Request, res: Response) => {
         .limit(1)
         .for("update");
       const now = new Date();
-      if (!session || session.status === "closed" ||
-          session.lastActivityAt < idleCutoff(settings, now)) return { kind: "session" };
+      if (
+        !session ||
+        session.status === "closed" ||
+        session.lastActivityAt < idleCutoff(settings, now)
+      )
+        return { kind: "session" };
 
       if (!CUSTOMER_CANCELLABLE_STATUSES.includes(order.status)) {
         const code =
@@ -494,5 +533,9 @@ export const cancelCustomerOrder = async (req: Request, res: Response) => {
 
   const order = await loadOrderView(result.id);
   if (!order) throw new Error("cancelled order could not be reloaded");
-  return res.json({ success: true, currency: CURRENCY, data: order });
+  return res.json({
+    success: true,
+    currency: CURRENCY,
+    data: customerOrderView(order),
+  });
 };

@@ -1,4 +1,4 @@
-import { and, asc, eq, inArray, lt, notInArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, lt, notInArray, sql } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 import { db } from "../db/index.ts";
 import {
@@ -284,13 +284,15 @@ export const findOrders = async (
   where: SQL | undefined,
   limit: number,
   offset: number,
+  direction: "asc" | "desc" = "asc",
 ): Promise<OrderView[]> => {
+  const sort = direction === "desc" ? desc : asc;
   const rows = await db
     .select(orderColumns)
     .from(orders)
     .innerJoin(shopTables, eq(orders.tableId, shopTables.id))
     .where(where)
-    .orderBy(asc(orders.createdAt), asc(orders.id))
+    .orderBy(sort(orders.createdAt), sort(orders.id))
     .limit(limit)
     .offset(offset);
   return hydrateOrders(rows);

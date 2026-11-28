@@ -148,7 +148,7 @@ export const findHistoricalOrders = async (input: HistoryQuery, range?: DateRang
     search,
   );
   const [rows, [count]] = await Promise.all([
-    findOrders(where, input.limit, input.offset),
+    findOrders(where, input.limit, input.offset, "desc"),
     db.select({ total: sql<number>`count(*)::int` }).from(orders).where(where),
   ]);
   const total = count?.total ?? 0;

@@ -18,7 +18,7 @@ const client = {
 };
 mock.module("../src/db/index.ts", { namedExports: { db: drizzle(client as never) } });
 
-const { resolveDateRange, localDateBoundary, getDashboard } = await import("../src/lib/reports.ts");
+const { resolveDateRange, localDateBoundary, getDashboard, findHistoricalOrders } = await import("../src/lib/reports.ts");
 const { dashboardQuerySchema, historyQuerySchema, exportQuerySchema } = await import("../src/validators/reports.ts");
 const { csvCell } = await import("../src/controllers/reports.ts");
 const { dashboardRoute, historyRoute, exportRoute } = await import("../src/routes/reports/admin.ts");
@@ -89,6 +89,18 @@ test("dashboard reports paid revenue including paid-cancelled orders and shop-lo
   assert.match(metricsSql, /total/);
   assert.ok(queries.some((query) => query.text.includes("at time zone")));
   assert.equal(replies.length, 0);
+});
+
+test("order history sorts newest first before applying pagination", async () => {
+  replies = [[], [[12]]];
+  queries = [];
+  const result = await findHistoricalOrders({ limit: 12, offset: 12 });
+  assert.match(
+    queries[0]!.text,
+    /order by "orders"\."created_at" desc, "orders"\."id" desc limit \$1 offset \$2/,
+  );
+  assert.deepEqual(queries[0]!.params, [12, 12]);
+  assert.deepEqual(result.pagination, { limit: 12, offset: 12, total: 12, hasMore: false });
 });
 
 test("CSV cells are quoted and spreadsheet formula prefixes are neutralized", () => {
